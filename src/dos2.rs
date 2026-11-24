@@ -96,13 +96,7 @@ impl Entry {
     /// The name as DOS shows it, e.g. `SAMPLE.LST` (no dot when there is
     /// no extension). Bytes other than printable ASCII show as `?`.
     pub fn file_name(&self) -> String {
-        let name = text(&self.name);
-        let ext = text(&self.ext);
-        if ext.is_empty() {
-            name
-        } else {
-            format!("{name}.{ext}")
-        }
+        display_name(&self.name, &self.ext)
     }
 
     /// Locked files can't be written, renamed or deleted from DOS.
@@ -123,8 +117,20 @@ impl Entry {
     }
 }
 
+/// `NAME.EXT` from 8 + 3 stored bytes (no dot when there is no
+/// extension); shared with SpartaDOS.
+pub(crate) fn display_name(name: &[u8], ext: &[u8]) -> String {
+    let name = text(name);
+    let ext = text(ext);
+    if ext.is_empty() {
+        name
+    } else {
+        format!("{name}.{ext}")
+    }
+}
+
 /// Trimmed, printable text from a name field.
-fn text(bytes: &[u8]) -> String {
+pub(crate) fn text(bytes: &[u8]) -> String {
     let s: String = bytes
         .iter()
         .map(|&b| {

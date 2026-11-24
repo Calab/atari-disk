@@ -2,23 +2,25 @@
 
 A Rust library for reading and writing Atari 8-bit disk images.
 
-**Status: early work.** The disk-image layer (ATR and XFD) is done. The
-DOS 2 and SpartaDOS file systems are next.
+**Status: early work.** Disk images (ATR and XFD), DOS 2 and SpartaDOS
+read and write; the API may still change before a first release.
 
 ## What it does
 
-- **Disk images**: `.ATR` and `.XFD` files with 128- or 256-byte sectors:
+- **Disk images**: `.ATR` and `.XFD` files with 128-, 256- or 512-byte
+  sectors (512 in ATR only):
   single (720 × 128), enhanced (1040 × 128), double (720 × 256) and larger
   ATR images such as hard-disk partitions. Every image is written back
   exactly as it was read, including the three ways double-density images
   store their boot sectors and the extra ATR header bytes (such as the
   write-protect flag).
-- **File systems** (in progress):
+- **File systems**:
   - Atari DOS 2.0S, 2.0D and 2.5
   - SpartaDOS 2.x/3.x and SpartaDOS X (which share one file-system format)
 
-  For each: list directories, read, write, rename and delete files, make
-  directories (SpartaDOS), and format blank disks. Copy and move are left
+  For each: list directories, read, write, rename, delete, lock and
+  unlock files, make directories and set dates and volume names
+  (SpartaDOS), read and write raw sectors, and format blank data disks. Copy and move are left
   to the program using the library.
 
 The library works on images in memory and does no file I/O of its own: read

@@ -3,9 +3,9 @@
 //! * [`DiskImage`]: the sectors of an `.ATR` or `.XFD` file.
 //! * [`Volume`]: a disk and its file system, to list, read, write,
 //!   rename, delete, lock and unlock files and format blank data disks.
-//!   Atari DOS 2 (2.0S, 2.0D, 2.5) for now; SpartaDOS (2.x, 3.x and
-//!   SpartaDOS X) is coming.
-//! * [`Dos2`]: the low-level DOS 2 reader underneath.
+//!   Atari DOS 2 (2.0S, 2.0D, 2.5) and SpartaDOS (2.x, 3.x and
+//!   SpartaDOS X, with directories and dates).
+//! * [`Dos2`] and [`Sparta`]: the low-level readers underneath.
 //!
 //! Everything works on an image in memory: read the file's bytes, change
 //! the image, then write [`DiskImage::to_bytes`] back. The crate does no
@@ -25,9 +25,11 @@
 mod dos2;
 mod error;
 mod image;
+mod sparta;
 mod volume;
 
 pub use dos2::{Dos2, Entry as Dos2Entry};
 pub use error::{Error, Result};
 pub use image::{Container, Density, DiskImage};
+pub use sparta::{Entry as SpartaEntry, Sparta, Timestamp};
 pub use volume::{DirEntry, EntryKind, FileSystem, Layout, Volume};

@@ -4,7 +4,9 @@
 //!
 //! Sectors are numbered from 1, as the Atari numbers them. On disks with
 //! 256-byte sectors the first three (the boot sectors) are still 128 bytes
-//! long, because the Atari OS always reads them that way.
+//! long, because the Atari OS always reads them that way. Disks with
+//! 512-byte sectors (hard disks under SpartaDOS X; the OS can't boot
+//! from them) keep all their sectors full length.
 //!
 //! # ATR
 //! A 16-byte header, then the sectors:
@@ -263,11 +265,11 @@ impl DiskImage {
         self.atr_extra[15 - 7] & 1 != 0
     }
 
-    /// The number of data bytes in sector `n`: 128 for the boot sectors,
-    /// otherwise the sector size.
+    /// The number of data bytes in sector `n`: 128 for the boot sectors
+    /// of a disk with 256-byte sectors, otherwise the sector size.
     pub fn sector_len(&self, n: u32) -> usize {
-        if n <= BOOT_SECTORS {
-            BOOT_LEN.min(self.sector_size)
+        if n <= BOOT_SECTORS && self.sector_size == 256 {
+            BOOT_LEN
         } else {
             self.sector_size
         }
@@ -323,7 +325,7 @@ impl DiskImage {
         let n = n as usize;
         let boot = BOOT_SECTORS as usize;
         match self.boot {
-            _ if self.sector_size == BOOT_LEN => (n - 1) * BOOT_LEN,
+            _ if self.sector_size != 256 => (n - 1) * self.sector_size,
             Boot::Short if n <= boot => (n - 1) * BOOT_LEN,
             Boot::Short => boot * BOOT_LEN + (n - boot - 1) * self.sector_size,
             Boot::Packed if n <= boot => (n - 1) * BOOT_LEN,
@@ -347,7 +349,8 @@ impl DiskImage {
         let ok = match self.sector_size {
             128 => true,
             // Only the standard double-density disk has a recognisable size.
-            _ => self.count == 720,
+            256 => self.count == 720,
+            _ => false,
         };
         if ok {
             Ok(())
@@ -362,8 +365,7 @@ impl DiskImage {
 
 fn check_sector_size(size: usize) -> Result<()> {
     match size {
-        128 | 256 => Ok(()),
-        512 => Err(Error::Unsupported("512-byte sectors".into())),
+        128 | 256 | 512 => Ok(()),
         _ => Err(Error::NotAnImage(format!("{size}-byte sectors"))),
     }
 }
@@ -384,7 +386,9 @@ enum Boot {
 fn layout(body: &[u8], sector_size: usize) -> Result<(u32, Boot)> {
     let len = body.len();
     let boot = BOOT_SECTORS as usize * BOOT_LEN;
-    let (count, layout) = if sector_size == BOOT_LEN || len < boot {
+    let (count, layout) = if sector_size != 256 {
+        (len.div_ceil(sector_size), Boot::Short)
+    } else if len < boot {
         (len.div_ceil(BOOT_LEN), Boot::Short)
     } else if len.is_multiple_of(sector_size) {
         // Three 128-byte boot sectors would leave half a sector over, so
@@ -561,12 +565,25 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_sector_sizes() {
-        let mut bytes = vec![0x96, 0x02, 0x00, 0x01, 0x00, 0x02];
+    fn sector_sizes_512_and_others() {
+        // 512-byte sectors: every sector full length, boot sectors too.
+        let mut image = DiskImage::new(Container::Atr, 512, 8).unwrap();
+        fill(&mut image);
+        assert_eq!(image.sector(1).unwrap().len(), 512);
+        let bytes = image.to_bytes();
+        assert_eq!(bytes.len(), 16 + 8 * 512);
+        assert_eq!(bytes[16 + 512], 2 * 7);
+        assert_eq!(DiskImage::from_bytes(&bytes).unwrap(), image);
+        assert!(matches!(
+            image.set_container(Container::Xfd),
+            Err(Error::NotRepresentable(_))
+        ));
+        // Anything else isn't an Atari sector size.
+        let mut bytes = vec![0x96, 0x02, 0x00, 0x01, 0x00, 0x04];
         bytes.extend_from_slice(&[0; 10 + 4096]);
         assert!(matches!(
             DiskImage::from_bytes(&bytes),
-            Err(Error::Unsupported(_))
+            Err(Error::NotAnImage(_))
         ));
     }
 }

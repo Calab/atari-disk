@@ -40,6 +40,11 @@ pub enum Error {
     DiskFull { needed: u32, free: u32 },
     /// The directory has no room for another entry (DOS 2 holds 64).
     DirectoryFull,
+    /// Only empty directories can be deleted.
+    DirectoryNotEmpty(String),
+    /// Not a date and time the file system can store (SpartaDOS: 1980 to
+    /// 2079).
+    BadDate(String),
 }
 
 impl fmt::Display for Error {
@@ -69,6 +74,8 @@ impl fmt::Display for Error {
                 write!(f, "disk full: {needed} sectors needed, {free} free")
             }
             Error::DirectoryFull => write!(f, "the directory is full"),
+            Error::DirectoryNotEmpty(name) => write!(f, "{name} is not empty"),
+            Error::BadDate(when) => write!(f, "bad date: {when}"),
         }
     }
 }
