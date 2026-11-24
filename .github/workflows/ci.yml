@@ -1,0 +1,30 @@
+name: CI
+
+# Format, lints and tests on Linux, Windows and macOS. The sample disk
+# images aren't in the repository, so CI runs only the built-in tests.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Check formatting and lints
+        if: runner.os == 'Linux'
+        run: |
+          cargo fmt --all --check
+          cargo clippy --all-targets -- -D warnings
+      - name: Test
+        run: cargo test

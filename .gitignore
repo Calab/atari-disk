@@ -1,0 +1,8 @@
+/target
+# Files for Steve to review.
+/tmp
+# Real disk images from the NAS: copyrighted, so never committed. The tests
+# skip any folder that's missing.
+/samples/DOS 2
+/samples/SpartaDOS
+/samples/MyDOS
