@@ -73,6 +73,7 @@ pub struct Sparta<'a> {
 
 /// One entry in a SpartaDOS directory: a file or a directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Entry {
     /// The sector map of the directory the entry is in.
     pub parent: u16,
@@ -99,8 +100,10 @@ pub struct Entry {
     pub damaged: bool,
 }
 
-/// A date and time from a directory entry.
+/// A date and time, as SpartaDOS keeps them for files and directories.
+/// Make one with [`Timestamp::new`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[non_exhaustive]
 pub struct Timestamp {
     /// The full year: SpartaDOS keeps 2 digits, read as 1980–2079.
     pub year: u16,
@@ -116,7 +119,13 @@ impl Entry {
     /// there is no extension). Bytes other than printable ASCII show as
     /// `?`.
     pub fn file_name(&self) -> String {
-        crate::dos2::display_name(&self.name, &self.ext)
+        crate::names::display(&self.name, &self.ext)
+    }
+
+    /// The name as stored, `NAME.EXT` in ATASCII: what a path gives to
+    /// find it.
+    pub fn stored_name(&self) -> Vec<u8> {
+        crate::names::joined(&self.name, &self.ext)
     }
 
     pub fn is_dir(&self) -> bool {
@@ -226,9 +235,10 @@ impl<'a> Sparta<'a> {
         self.info()[0x20]
     }
 
-    /// The volume name, trimmed.
-    pub fn volume_name(&self) -> String {
-        crate::dos2::text(&self.info()[0x16..0x1E])
+    /// The volume name as stored (ATASCII), without the spaces at the
+    /// end.
+    pub fn volume_name(&self) -> Vec<u8> {
+        crate::names::joined(&self.info()[0x16..0x1E], b"")
     }
 
     /// The sectors on the disk, as sector 1 gives them.
@@ -308,34 +318,42 @@ impl<'a> Sparta<'a> {
     /// `same`.
     pub(crate) fn list_path(
         &self,
-        path: &str,
-        same: impl Fn(&Entry, &str) -> bool,
+        path: &[u8],
+        same: impl Fn(&Entry, &[u8]) -> bool,
     ) -> Result<Vec<Entry>> {
         self.list_dir(self.dir_map(path, same)?)
     }
 
-    /// The sector map of directory `path`.
-    pub(crate) fn dir_map(&self, path: &str, same: impl Fn(&Entry, &str) -> bool) -> Result<u16> {
+    /// The sector map of directory `path`. Fails with
+    /// [`Error::NotFound`] if a part of it isn't there, or
+    /// [`Error::NotADirectory`] if it's a file.
+    pub(crate) fn dir_map(&self, path: &[u8], same: impl Fn(&Entry, &[u8]) -> bool) -> Result<u16> {
         let mut map = self.root;
-        for part in path.split('>').filter(|p| !p.is_empty()) {
+        for part in path.split(|&c| c == b'>').filter(|p| !p.is_empty()) {
+            let text = || crate::atascii::atascii_to_ascii(path);
             let entry = self
                 .list_dir(map)?
                 .into_iter()
-                .find(|e| e.is_dir() && same(e, part))
-                .ok_or_else(|| Error::NotFound(path.to_string()))?;
+                .find(|e| same(e, part))
+                .ok_or_else(|| Error::NotFound(text()))?;
+            if !entry.is_dir() {
+                return Err(Error::NotADirectory(text()));
+            }
             map = entry.map;
         }
         Ok(map)
     }
 
-    /// The entry at `path` (e.g. `"GAMES>PACMAN.COM"`), ignoring case.
-    pub fn find(&self, path: &str) -> Result<Entry> {
-        let same = |e: &Entry, name: &str| e.file_name().eq_ignore_ascii_case(name);
-        let (dir, name) = path.rsplit_once('>').unwrap_or(("", path));
+    /// The entry at `path` (e.g. `"GAMES>PACMAN.COM"`, as ATASCII),
+    /// ignoring case.
+    pub fn find(&self, path: impl AsRef<[u8]>) -> Result<Entry> {
+        let path = path.as_ref();
+        let same = |e: &Entry, name: &[u8]| e.stored_name().eq_ignore_ascii_case(name);
+        let (dir, name) = crate::names::split_path(path);
         self.list_path(dir, same)?
             .into_iter()
             .find(|e| same(e, name))
-            .ok_or_else(|| Error::NotFound(path.to_string()))
+            .ok_or_else(|| Error::NotFound(crate::atascii::atascii_to_ascii(path)))
     }
 
     /// The contents of a file (or the raw bytes of a directory). Fails
@@ -344,6 +362,11 @@ impl<'a> Sparta<'a> {
     /// than the length needs.
     pub fn read(&self, entry: &Entry) -> Result<Vec<u8>> {
         self.read_map(entry.map, entry.size, &entry.file_name())
+    }
+
+    /// The bitmap's sectors.
+    pub(crate) fn bitmap_list(&self) -> std::ops::Range<u32> {
+        self.bitmap_first..self.bitmap_first + self.bitmap_count
     }
 
     /// Which sectors the disk's own records use: the boot sectors, the
@@ -388,7 +411,7 @@ impl<'a> Sparta<'a> {
     }
 
     /// A directory's length, from its header.
-    fn dir_len(&self, map: u16) -> Result<u32> {
+    pub(crate) fn dir_len(&self, map: u16) -> Result<u32> {
         let header = self.read_map(map, ENTRY_LEN as u32, "a directory")?;
         let len = u32::from(header[3]) | u32::from(header[4]) << 8 | u32::from(header[5]) << 16;
         if len < ENTRY_LEN as u32 {
@@ -417,7 +440,12 @@ impl<'a> Sparta<'a> {
 
     /// The sector maps of a file and the data sectors its `len` bytes
     /// take, checked.
-    fn data_sectors(&self, map: u16, len: u32, name: &str) -> Result<(Vec<u32>, Vec<u32>)> {
+    pub(crate) fn data_sectors(
+        &self,
+        map: u16,
+        len: u32,
+        name: &str,
+    ) -> Result<(Vec<u32>, Vec<u32>)> {
         let damaged = |why: String| Err(Error::Damaged(format!("{name}: {why}")));
         let size = self.image.sector_size() as u32;
         let wanted = len.div_ceil(size) as usize;
@@ -470,10 +498,24 @@ const SEQUENCE: usize = 0x26;
 /// SpartaDOS 3.x keeps directory lengths in 16 bits.
 const MAX_DIR_LEN: u32 = 0xFFFF;
 
-/// A name and extension as stored: 8 + 3 bytes, padded with spaces.
-pub(crate) type Name = [u8; 11];
+use crate::names::Name;
 
 impl Timestamp {
+    /// A date and time from 1980 to 2079 (the years SpartaDOS's two digits
+    /// can mean). Fails with [`Error::BadDate`] if it isn't a real one.
+    pub fn new(year: u16, month: u8, day: u8, hour: u8, minute: u8, second: u8) -> Result<Self> {
+        let t = Self {
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+        };
+        t.to_bytes()?;
+        Ok(t)
+    }
+
     /// The 6 bytes a directory entry stores: day, month, year (2 digits),
     /// hours, minutes, seconds. Fails with [`Error::BadDate`] if it isn't
     /// a real date and time from 1980 to 2079.
@@ -738,7 +780,8 @@ impl<'i> Writer<'i> {
 
     /// Write a file into directory `dir`, replacing `old` if given (its
     /// sectors are freed first, so a file that only fits once the old one
-    /// is gone still fits). `when` of `None` leaves the date blank.
+    /// is gone still fits). `when` of `None` leaves a new file's date
+    /// blank, and keeps a replaced file's.
     pub(crate) fn write(
         &mut self,
         dir: u16,
@@ -753,7 +796,6 @@ impl<'i> Writer<'i> {
                 free: self.free_count(),
             });
         }
-        let when = when.unwrap_or_default();
         if let Some(old) = old {
             self.free_chain(old.map, old.size)?;
         }
@@ -763,9 +805,15 @@ impl<'i> Writer<'i> {
             Some(old) => self.edit_entry(old, |e| {
                 e[1..3].copy_from_slice(&map.to_le_bytes());
                 e[3..6].copy_from_slice(&len[..3]);
-                e[17..23].copy_from_slice(&when);
+                // No new date: keep the old one.
+                if let Some(when) = when {
+                    e[17..23].copy_from_slice(&when);
+                }
             }),
-            None => self.add_entry(dir, &raw_entry(IN_USE, map, data.len() as u32, name, &when)),
+            None => {
+                let when = when.unwrap_or_default();
+                self.add_entry(dir, &raw_entry(IN_USE, map, data.len() as u32, name, &when))
+            }
         }
     }
 
@@ -806,17 +854,77 @@ impl<'i> Writer<'i> {
     }
 
     pub(crate) fn set_locked(&mut self, entry: &Entry, locked: bool) -> Result<()> {
+        self.set_flag(entry, LOCKED, locked)
+    }
+
+    pub(crate) fn set_hidden(&mut self, entry: &Entry, on: bool) -> Result<()> {
+        self.set_flag(entry, HIDDEN, on)
+    }
+
+    pub(crate) fn set_archived(&mut self, entry: &Entry, on: bool) -> Result<()> {
+        self.set_flag(entry, ARCHIVED, on)
+    }
+
+    fn set_flag(&mut self, entry: &Entry, flag: u8, on: bool) -> Result<()> {
         self.edit_entry(entry, |e| {
-            if locked {
-                e[0] |= LOCKED;
+            if on {
+                e[0] |= flag;
             } else {
-                e[0] &= !LOCKED;
+                e[0] &= !flag;
             }
         })
     }
 
+    /// Set an entry's date and time (`None`: blank). A directory's own
+    /// header gets it too.
+    pub(crate) fn set_timestamp(&mut self, entry: &Entry, when: Option<[u8; 6]>) -> Result<()> {
+        let when = when.unwrap_or_default();
+        self.edit_entry(entry, |e| e[17..23].copy_from_slice(&when))?;
+        if entry.is_dir() {
+            let mut bytes = self.dir(entry.map)?;
+            bytes[17..23].copy_from_slice(&when);
+            self.store_dir(entry.map, bytes)?;
+        }
+        Ok(())
+    }
+
+    /// Move an entry into directory `dir` (keeping its name, date and
+    /// sectors). A directory can't go into itself or one inside it.
+    pub(crate) fn move_entry(&mut self, entry: &Entry, dir: u16) -> Result<()> {
+        if entry.is_dir() {
+            // Walk up from `dir` to the main directory.
+            let mut m = dir;
+            let mut steps = 0;
+            while m != 0 {
+                if m == entry.map {
+                    return Err(Error::Unsupported(format!(
+                        "moving {} into itself",
+                        entry.file_name()
+                    )));
+                }
+                steps += 1;
+                if steps > self.total {
+                    return Err(Error::Damaged("directories go round in a loop".into()));
+                }
+                m = word(&self.dir(m)?, 1);
+            }
+        }
+        let mut raw = [0; ENTRY_LEN];
+        let bytes = self.dir(entry.parent)?;
+        let at = entry.index as usize * ENTRY_LEN;
+        raw.copy_from_slice(&bytes[at..at + ENTRY_LEN]);
+        self.edit_entry(entry, |e| e[0] = (e[0] & !IN_USE) | DELETED)?;
+        self.add_entry(dir, &raw)?;
+        if entry.is_dir() {
+            let mut own = self.dir(entry.map)?;
+            own[1..3].copy_from_slice(&dir.to_le_bytes());
+            self.store_dir(entry.map, own)?;
+        }
+        Ok(())
+    }
+
     /// Set the volume name: up to 8 printable characters.
-    pub(crate) fn set_volume_name(&mut self, name: &str) -> Result<()> {
+    pub(crate) fn set_volume_name(&mut self, name: &[u8]) -> Result<()> {
         let stored = volume_name(name)?;
         self.image.sector_mut(1)?[0x16..0x1E].copy_from_slice(&stored);
         Ok(())
@@ -834,48 +942,17 @@ fn raw_entry(flags: u8, map: u16, len: u32, name: &Name, when: &[u8; 6]) -> [u8;
     e
 }
 
-/// A volume name as stored: up to 8 printable characters, padded with
-/// spaces.
-fn volume_name(name: &str) -> Result<[u8; 8]> {
-    if name.len() > 8 || !name.bytes().all(|b| (0x20..0x7F).contains(&b)) {
+/// A volume name as stored: up to 8 printable ATASCII characters
+/// (`$20`-`$7C`), padded with spaces.
+pub(crate) fn volume_name(name: &[u8]) -> Result<[u8; 8]> {
+    if name.len() > 8 || !name.iter().all(|b| (0x20..=0x7C).contains(b)) {
         return Err(Error::BadName(format!(
-            "{name}: a volume name is up to 8 printable characters"
+            "{}: a volume name is up to 8 printable characters",
+            crate::atascii::atascii_to_ascii(name)
         )));
     }
     let mut out = [b' '; 8];
-    out[..name.len()].copy_from_slice(name.as_bytes());
-    Ok(out)
-}
-
-/// Check a SpartaDOS name and give the 11 bytes it's stored as: 1 to 8
-/// letters, digits or `_`, then optionally a dot and up to 3 more. With
-/// `uppercase`, lower-case letters are turned into capitals first;
-/// without it they're refused.
-pub(crate) fn parse_name(name: &str, uppercase: bool) -> Result<Name> {
-    let bad = |why: &str| Err(Error::BadName(format!("{name}: {why}")));
-    let text = if uppercase {
-        name.to_ascii_uppercase()
-    } else {
-        name.to_string()
-    };
-    let (base, ext) = text.split_once('.').unwrap_or((&text, ""));
-    if base.is_empty() || base.len() > 8 {
-        return bad("the name must be 1 to 8 characters");
-    }
-    if ext.len() > 3 {
-        return bad("the extension can be at most 3 characters");
-    }
-    let ok = |c: char| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_';
-    if !base.chars().chain(ext.chars()).all(ok) {
-        return if text.chars().any(|c| c.is_ascii_lowercase()) {
-            bad("lower-case letters aren't allowed")
-        } else {
-            bad("only letters A-Z, digits 0-9 and _ are allowed")
-        };
-    }
-    let mut out = [b' '; 11];
-    out[..base.len()].copy_from_slice(base.as_bytes());
-    out[8..8 + ext.len()].copy_from_slice(ext.as_bytes());
+    out[..name.len()].copy_from_slice(name);
     Ok(out)
 }
 
@@ -897,7 +974,7 @@ pub(crate) fn format(
     container: crate::Container,
     size: usize,
     count: u32,
-    name: &str,
+    name: &[u8],
 ) -> Result<DiskImage> {
     let stored = volume_name(name)?;
     if !(16..=0xFFFF).contains(&count) {
@@ -1025,7 +1102,7 @@ mod tests {
     fn reads_a_tiny_disk() {
         let image = tiny();
         let fs = Sparta::open(&image).unwrap();
-        assert_eq!(fs.volume_name(), "TINY");
+        assert_eq!(fs.volume_name(), b"TINY");
         assert_eq!(fs.version(), 0x20);
         assert_eq!(fs.free_sectors(), 710);
         assert!(!fs.is_free(10) && fs.is_free(11) && fs.is_free(720) && !fs.is_free(721));

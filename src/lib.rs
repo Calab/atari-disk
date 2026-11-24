@@ -1,10 +1,16 @@
 //! Read and write Atari 8-bit disk images.
 //!
-//! * [`DiskImage`]: the sectors of an `.ATR` or `.XFD` file.
-//! * [`Volume`]: a disk and its file system, to list, read, write,
-//!   rename, delete, lock and unlock files and format blank data disks.
-//!   Atari DOS 2 (2.0S, 2.0D, 2.5) and SpartaDOS (2.x, 3.x and
-//!   SpartaDOS X, with directories and dates).
+//! * [`DiskImage`]: the sectors of an `.ATR` or `.XFD` file (128-, 256-
+//!   or 512-byte sectors), read and written directly if you like.
+//! * [`Volume`]: a disk and its file system: list, read (all or part of
+//!   a file), write, rename, move, delete, lock and unlock files; make
+//!   directories; set dates, hidden and archive flags; check names; see
+//!   what every sector holds and validate the disk; format blank data
+//!   disks; make a disk bootable from a DOS disk you supply. For Atari
+//!   DOS 2 (2.0S, 2.0D, 2.5), MyDOS 4.x and SpartaDOS (2.x, 3.x and
+//!   SpartaDOS X).
+//! * [`atascii`]: names and paths are ATASCII bytes; this converts to and
+//!   from ASCII text.
 //! * [`Dos2`] and [`Sparta`]: the low-level readers underneath.
 //!
 //! Everything works on an image in memory: read the file's bytes, change
@@ -22,12 +28,16 @@
 //! # Ok::<(), atari_disk::Error>(())
 //! ```
 
+pub mod atascii;
+mod check;
 mod dos2;
 mod error;
 mod image;
+mod names;
 mod sparta;
 mod volume;
 
+pub use check::{Problem, SectorUse};
 pub use dos2::{Dos2, Entry as Dos2Entry};
 pub use error::{Error, Result};
 pub use image::{Container, Density, DiskImage};

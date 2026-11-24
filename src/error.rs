@@ -2,8 +2,10 @@
 
 use std::fmt;
 
-/// Everything that can go wrong reading or changing a disk image.
+/// Everything that can go wrong reading or changing a disk image. More
+/// kinds may be added, so a `match` needs a `_` arm.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Error {
     /// The bytes aren't a disk image this crate understands; the text says
     /// why.
@@ -29,6 +31,10 @@ pub enum Error {
     Damaged(String),
     /// No file or directory of that name.
     NotFound(String),
+    /// A directory was given where a file is needed (e.g. to read it).
+    IsDirectory(String),
+    /// A file was given where a directory is needed (e.g. in a path).
+    NotADirectory(String),
     /// A file or directory of that name is already there.
     AlreadyExists(String),
     /// The name breaks the file system's rules; the text says how.
@@ -45,6 +51,9 @@ pub enum Error {
     /// Not a date and time the file system can store (SpartaDOS: 1980 to
     /// 2079).
     BadDate(String),
+    /// The disk given to boot from has no DOS to copy, or one that
+    /// doesn't suit the disk being made bootable; the text says why.
+    NotBootable(String),
 }
 
 impl fmt::Display for Error {
@@ -67,6 +76,8 @@ impl fmt::Display for Error {
             Error::UnknownFileSystem(why) => write!(f, "unknown file system ({why})"),
             Error::Damaged(why) => write!(f, "damaged: {why}"),
             Error::NotFound(name) => write!(f, "{name} not found"),
+            Error::IsDirectory(name) => write!(f, "{name} is a directory"),
+            Error::NotADirectory(name) => write!(f, "{name} is not a directory"),
             Error::AlreadyExists(name) => write!(f, "{name} already exists"),
             Error::BadName(why) => write!(f, "bad name: {why}"),
             Error::Locked(name) => write!(f, "{name} is locked"),
@@ -76,6 +87,7 @@ impl fmt::Display for Error {
             Error::DirectoryFull => write!(f, "the directory is full"),
             Error::DirectoryNotEmpty(name) => write!(f, "{name} is not empty"),
             Error::BadDate(when) => write!(f, "bad date: {when}"),
+            Error::NotBootable(why) => write!(f, "can't make it bootable: {why}"),
         }
     }
 }

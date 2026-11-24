@@ -3,7 +3,10 @@
 
 use std::path::Path;
 
-use atari_disk::{Container, DiskImage, Dos2, EntryKind, Error, Layout, Sparta, Timestamp, Volume};
+use atari_disk::{
+    Container, DiskImage, Dos2, EntryKind, Error, FileSystem, Layout, Problem, SectorUse, Sparta,
+    Timestamp, Volume,
+};
 
 fn images() -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
@@ -63,18 +66,30 @@ fn dos2_samples_read() {
         }
         let fs = Dos2::open(&image).unwrap_or_else(|e| panic!("{name}: {e}"));
         println!("{name}: {} free", fs.free_sectors());
-        for entry in fs.list() {
-            let data = fs.read(&entry).unwrap_or_else(|e| panic!("{name}: {e}"));
-            let per_sector = image.sector_size() - 3;
-            println!(
-                "  {:12} {:4} sectors {:7} bytes{}",
-                entry.file_name(),
-                entry.sectors,
-                data.len(),
-                if entry.locked() { " locked" } else { "" }
-            );
-            assert_eq!(data.len() as u32, entry.size);
-            assert!(data.len() <= usize::from(entry.sectors) * per_sector);
+        let mut dirs = vec![(String::new(), fs.root())];
+        while let Some((path, dir)) = dirs.pop() {
+            for entry in fs.list_dir(dir).unwrap_or_else(|e| panic!("{name}: {e}")) {
+                assert!(!entry.damaged, "{name}: {path}{}", entry.file_name());
+                if entry.is_dir() {
+                    println!("  {path}{}>", entry.file_name());
+                    dirs.push((
+                        format!("{path}{}>", entry.file_name()),
+                        u32::from(entry.start),
+                    ));
+                    continue;
+                }
+                let data = fs.read(&entry).unwrap_or_else(|e| panic!("{name}: {e}"));
+                let per_sector = image.sector_size() - 3;
+                println!(
+                    "  {path}{:12} {:4} sectors {:7} bytes{}",
+                    entry.file_name(),
+                    entry.sectors,
+                    data.len(),
+                    if entry.locked() { " locked" } else { "" }
+                );
+                assert_eq!(data.len() as u32, entry.size);
+                assert!(data.len() <= usize::from(entry.sectors) * per_sector);
+            }
         }
         if fs.enhanced() {
             let below_720 = (0..720).filter(|&n| fs.is_free(n)).count() as u32;
@@ -89,9 +104,12 @@ fn dos2_samples_read() {
                 assert_eq!(blank.image().sector(1024).unwrap()[84..], vtoc2[84..]);
             }
         }
-        let all = (0..=image.sector_count().min(1023))
-            .filter(|&n| fs.is_free(n))
-            .count() as u32;
+        let last = if fs.mydos() {
+            image.sector_count()
+        } else {
+            image.sector_count().min(1023)
+        };
+        let all = (0..=last).filter(|&n| fs.is_free(n)).count() as u32;
         assert_eq!(all, fs.free_sectors(), "{name}");
     }
 }
@@ -102,23 +120,110 @@ fn dos2_samples_read() {
 fn dos2_samples_write_and_delete() {
     for path in images() {
         let image = DiskImage::from_bytes(&std::fs::read(&path).unwrap()).unwrap();
-        if !Volume::detect(&image).is_some_and(|fs| !fs.has_directories()) {
+        let Some(fs) = Volume::detect(&image) else {
+            continue;
+        };
+        if matches!(fs, FileSystem::SpartaDos | FileSystem::SpartaDosX) {
             continue;
         }
         let name = path.file_name().unwrap().to_string_lossy();
         let mut vol = Volume::open(image).unwrap();
         let before: Vec<_> = vol.list("").unwrap();
-        let contents: Vec<_> = before.iter().map(|e| vol.read(&e.name).unwrap()).collect();
+        let contents: Vec<_> = before
+            .iter()
+            .filter(|e| !e.is_dir())
+            .map(|e| vol.read(&e.name).unwrap())
+            .collect();
         let free = vol.free_sectors();
-        let data: Vec<u8> = (0..vol.free_bytes().min(20_000)).map(|i| i as u8).collect();
+        let data: Vec<u8> = (0..vol.free_bytes().min(20_000) - 3000)
+            .map(|i| i as u8)
+            .collect();
         vol.write("TEST.DAT", &data, None)
             .unwrap_or_else(|e| panic!("{name}: {e}"));
         assert_eq!(vol.read("TEST.DAT").unwrap(), data, "{name}");
+        if fs == FileSystem::MyDos {
+            // A directory, a file in it, and a move there and back.
+            vol.make_dir("NEWDIR", None)
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
+            vol.write("NEWDIR>IN.DAT", &data[..1000], None).unwrap();
+            assert_eq!(vol.read("NEWDIR>IN.DAT").unwrap(), data[..1000], "{name}");
+            vol.move_to("TEST.DAT", "NEWDIR").unwrap();
+            assert_eq!(vol.read("NEWDIR>TEST.DAT").unwrap(), data, "{name}");
+            assert!(matches!(
+                vol.delete("NEWDIR"),
+                Err(Error::DirectoryNotEmpty(_))
+            ));
+            vol.move_to("NEWDIR>TEST.DAT", "").unwrap();
+            assert_eq!(vol.read("TEST.DAT").unwrap(), data, "{name}");
+            vol.delete("NEWDIR>IN.DAT").unwrap();
+            vol.delete("NEWDIR").unwrap();
+        }
         vol.delete("TEST.DAT").unwrap();
         assert_eq!(vol.free_sectors(), free, "{name}");
         assert_eq!(vol.list("").unwrap(), before, "{name}");
-        for (entry, old) in before.iter().zip(&contents) {
+        let files = before.iter().filter(|e| !e.is_dir());
+        for (entry, old) in files.zip(&contents) {
             assert_eq!(&vol.read(&entry.name).unwrap(), old, "{name}");
+        }
+    }
+}
+
+/// Steve's MyDOS 4.5 disks, emptied, against blanks we format: the VTOC
+/// (every sector of it) must match.
+#[test]
+fn mydos_format_matches() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("samples/MyDOS");
+    for (file, layout) in [
+        ("SD MyDOS45.atr", Layout::MyDosSingle),
+        ("MD MyDOS45.atr", Layout::MyDosEnhanced),
+        ("DD MyDOS45.atr", Layout::MyDosDouble),
+        (
+            "Large 128 MyDOS45.atr",
+            Layout::MyDosCustom {
+                sectors: 65535,
+                sector_size: 128,
+            },
+        ),
+        (
+            "Large 256 MyDOS45.atr",
+            Layout::MyDosCustom {
+                sectors: 65535,
+                sector_size: 256,
+            },
+        ),
+    ] {
+        let Ok(bytes) = std::fs::read(dir.join(file)) else {
+            eprintln!("skipping {file} (not found)");
+            continue;
+        };
+        let mut dos = Volume::open(DiskImage::from_bytes(&bytes).unwrap()).unwrap();
+        assert_eq!(dos.file_system(), FileSystem::MyDos, "{file}");
+        // Empty it: files in directories first.
+        let mut dirs = vec![String::new()];
+        let mut order = Vec::new();
+        while let Some(d) = dirs.pop() {
+            for e in dos.list(&d).unwrap() {
+                let path = format!("{d}{}", e.name_text());
+                if e.is_dir() {
+                    dirs.push(format!("{path}>"));
+                }
+                order.push(path);
+            }
+        }
+        for path in order.iter().rev() {
+            dos.unlock(path).unwrap();
+            dos.delete(path)
+                .unwrap_or_else(|e| panic!("{file}: {path}: {e}"));
+        }
+        let ours = Volume::format(layout, Container::Atr).unwrap();
+        assert_eq!(dos.free_sectors(), ours.free_sectors(), "{file}");
+        let vtoc = Dos2::open(ours.image()).unwrap().vtoc_sectors();
+        for n in 360 - vtoc + 1..=360 {
+            assert_eq!(
+                dos.image().sector(n).unwrap(),
+                ours.image().sector(n).unwrap(),
+                "{file}: VTOC sector {n}"
+            );
         }
     }
 }
@@ -153,7 +258,7 @@ fn sparta_samples_read() {
         println!(
             "{name}: {:?} \"{}\", {} free, used but marked free: {wrong:?}",
             Volume::detect(&image).unwrap(),
-            fs.volume_name(),
+            atari_disk::atascii::atascii_to_ascii(&fs.volume_name()),
             fs.free_sectors(),
         );
         // This one's main directory grew to 2 sectors, but whatever made
@@ -171,7 +276,7 @@ fn sparta_samples_read() {
         let mut files = 0;
         while let Some(dir) = dirs.pop() {
             for entry in vol.list(&dir).unwrap() {
-                let path = format!("{dir}{}", entry.name);
+                let path = format!("{dir}{}", entry.name_text());
                 assert!(!entry.damaged, "{name}: {path}");
                 if entry.kind == EntryKind::Directory {
                     dirs.push(path + ">");
@@ -190,14 +295,7 @@ fn sparta_samples_read() {
         let data: Vec<u8> = (0..vol.free_bytes().min(40_000) - 2000)
             .map(|i| i as u8)
             .collect();
-        let when = Timestamp {
-            year: 2026,
-            month: 11,
-            day: 24,
-            hour: 15,
-            minute: 30,
-            second: 0,
-        };
+        let when = Timestamp::new(2026, 11, 24, 15, 30, 0).unwrap();
         vol.make_dir("NEWDIR", Some(when))
             .unwrap_or_else(|e| panic!("{name}: {e}"));
         vol.write("NEWDIR>TEST.DAT", &data, Some(when))
@@ -224,6 +322,156 @@ fn sparta_samples_read() {
         vol.delete("NEWDIR").unwrap();
         assert_eq!(vol.free_sectors(), free, "{name}");
         assert_eq!(vol.list("").unwrap(), before, "{name}");
+    }
+}
+
+/// Every sample validates clean, except the Turbo-Basic disk's one
+/// known flaw. The sector map agrees with the free counts.
+#[test]
+fn samples_validate() {
+    for path in images() {
+        let image = DiskImage::from_bytes(&std::fs::read(&path).unwrap()).unwrap();
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        let Ok(vol) = Volume::open(image) else {
+            println!("{name}: no file system");
+            continue;
+        };
+        let problems = vol.validate().unwrap();
+        println!(
+            "{name}: {:?}, {} problems",
+            vol.file_system(),
+            problems.len()
+        );
+        for p in problems.iter().take(8) {
+            println!("  {p}");
+        }
+        let map = vol.sector_map().unwrap();
+        assert_eq!(map.len() as u32, vol.image().sector_count() + 1);
+        let free = map.iter().filter(|u| **u == SectorUse::Free).count() as u32;
+        if name.starts_with("Turbo-Basic XL 3.2q") {
+            assert_eq!(
+                problems,
+                [Problem::MarkedFree {
+                    sector: 7,
+                    owner: SectorUse::Directory(Vec::new())
+                }]
+            );
+            assert_eq!(free + 1, vol.free_sectors(), "{name}");
+        } else {
+            assert!(problems.is_empty(), "{name}: {problems:?}");
+            assert_eq!(free, vol.free_sectors(), "{name}");
+        }
+    }
+}
+
+/// Making our blank disks bootable from Steve's DOS disks gives the boot
+/// sectors DOS itself wrote on his blanks, and copies of the DOS files.
+#[test]
+fn bootable_matches_dos() {
+    let load = |dir: &str, file: &str| {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("samples")
+            .join(dir)
+            .join(file);
+        Some(DiskImage::from_bytes(&std::fs::read(path).ok()?).unwrap())
+    };
+    let boot = |image: &DiskImage| -> Vec<u8> {
+        (1..=3)
+            .flat_map(|n| image.sector(n).unwrap().to_vec())
+            .collect()
+    };
+
+    // DOS 2.0S onto double density: as 2.0S's own DUP wrote it.
+    if let (Some(dos), Some(theirs)) = (
+        load("DOS 2", "Dos 2.0s.atr"),
+        load("DOS 2", "blank DOS2 DD.atr"),
+    ) {
+        let mut vol = Volume::format(Layout::Dos2Double, Container::Atr).unwrap();
+        vol.make_bootable(&dos).unwrap();
+        assert_eq!(boot(vol.image()), boot(&theirs));
+        // DUP writes DOS.SYS from memory, so theirs isn't a byte copy;
+        // ours is the source's.
+        let src = Volume::open(dos.clone()).unwrap();
+        for file in ["DOS.SYS", "DUP.SYS"] {
+            assert_eq!(vol.read(file).unwrap(), src.read(file).unwrap(), "{file}");
+        }
+        assert_eq!(vol.validate().unwrap(), []);
+        // Again: DOS.SYS is there now.
+        assert!(matches!(
+            vol.make_bootable(&dos),
+            Err(Error::AlreadyExists(_))
+        ));
+        // Not from a disk with no DOS, or for another DOS.
+        let blank = Volume::format(Layout::Dos2Single, Container::Atr).unwrap();
+        assert!(matches!(
+            vol.make_bootable(blank.image()),
+            Err(Error::NotBootable(_))
+        ));
+        let mut sparta = Volume::format(Layout::SpartaSingle, Container::Atr).unwrap();
+        assert!(matches!(
+            sparta.make_bootable(&dos),
+            Err(Error::NotBootable(_))
+        ));
+    }
+
+    // SpartaDOS 3.2g onto single density: as XINIT made it.
+    if let (Some(sparta), Some(theirs)) = (
+        load("SpartaDOS", "Spartados 3.2g.ATR"),
+        load("SpartaDOS", "blank 32.g SD.atr"),
+    ) {
+        let mut vol = Volume::format(Layout::SpartaSingle, Container::Atr).unwrap();
+        vol.make_bootable(&sparta).unwrap();
+        let (ours, xinit) = (boot(vol.image()), boot(&theirs));
+        for i in (0..384).filter(|i| !(0x09..0x2B).contains(i)) {
+            assert_eq!(ours[i], xinit[i], "boot byte {i:#x}");
+        }
+        // The boot file's sector map: X32G.DOS at sector 32 on both.
+        assert_eq!(ours[0x28..0x2A], xinit[0x28..0x2A]);
+        let theirs = Volume::open(theirs).unwrap();
+        assert_eq!(
+            vol.read("X32G.DOS").unwrap(),
+            theirs.read("X32G.DOS").unwrap()
+        );
+        assert_eq!(vol.validate().unwrap(), []);
+        // SpartaDOS X disks have no boot file.
+        if let Some(sdx) = load("SpartaDOS", "SDX 4.49e Toolkit.atr") {
+            let mut vol = Volume::format(Layout::SpartaDouble, Container::Atr).unwrap();
+            assert!(matches!(
+                vol.make_bootable(&sdx),
+                Err(Error::NotBootable(_))
+            ));
+        }
+    }
+
+    // MyDOS 4.5D onto a large disk: the boot sector points at the new
+    // DOS.SYS, which has 16-bit links there.
+    if let Some(mydos) = load("MyDOS", "MYDOS45D.ATR") {
+        let mut vol = Volume::format(
+            Layout::MyDosCustom {
+                sectors: 4000,
+                sector_size: 256,
+            },
+            Container::Atr,
+        )
+        .unwrap();
+        vol.make_bootable(&mydos).unwrap();
+        let ours = boot(vol.image());
+        let src = boot(&mydos);
+        assert_eq!(ours[..0x0E], src[..0x0E]);
+        assert_eq!(ours[0x11..], src[0x11..]);
+        let dos = Dos2::open(vol.image()).unwrap().find("DOS.SYS").unwrap();
+        assert_eq!(u16::from_le_bytes([ours[0x0F], ours[0x10]]), dos.start);
+        assert!(dos.big_links());
+        assert!(vol.exists("DUP.SYS"));
+        assert_eq!(vol.validate().unwrap(), []);
+        let mut small = Volume::format(
+            Layout::MyDosCustom {
+                sectors: 2000,
+                sector_size: 512,
+            },
+            Container::Atr,
+        );
+        assert!(small.is_err() || small.as_mut().unwrap().make_bootable(&mydos).is_err());
     }
 }
 
@@ -290,16 +538,7 @@ fn make_test_disks() {
     }
 
     // SpartaDOS.
-    let when = |day: u8, hour: u8| {
-        Some(Timestamp {
-            year: 2026,
-            month: 11,
-            day,
-            hour,
-            minute: 30,
-            second: 0,
-        })
-    };
+    let when = |day: u8, hour: u8| Some(Timestamp::new(2026, 11, day, hour, 30, 0).unwrap());
     for (layout, file, label) in [
         (Layout::SpartaSingle, "sparta-blank-sd.atr", "BLANK SD"),
         (Layout::SpartaEnhanced, "sparta-blank-ed.atr", "BLANK ED"),
@@ -345,7 +584,7 @@ fn make_test_disks() {
     vol.set_volume_name("MANY").unwrap();
     for i in 0..100 {
         vol.write(
-            &format!("FILE{i:03}.TXT"),
+            format!("FILE{i:03}.TXT"),
             &lines(&format!("THIS IS FILE {i}")),
             None,
         )
@@ -374,6 +613,116 @@ fn make_test_disks() {
         vol.write("BIG.DAT", &pattern(4000), when(24, 11)).unwrap();
         save(&vol, "sparta-tb-files.atr");
     }
+
+    // MyDOS: files, nested directories and a move, on three layouts.
+    for (layout, file) in [
+        (Layout::MyDosSingle, "mydos-files-sd.atr"),
+        (Layout::MyDosDouble, "mydos-files-dd.atr"),
+        (
+            Layout::MyDosCustom {
+                sectors: 8000,
+                sector_size: 256,
+            },
+            "mydos-files-big.atr",
+        ),
+    ] {
+        let mut vol = Volume::format(layout, Container::Atr).unwrap();
+        vol.write("HELLO.LST", &program, None).unwrap();
+        vol.write("TEXT.TXT", &text, None).unwrap();
+        vol.lock("TEXT.TXT").unwrap();
+        vol.write("BIG.DAT", &pattern(30_000), None).unwrap();
+        vol.make_dir("GAMES", None).unwrap();
+        vol.make_dir("GAMES>OLD", None).unwrap();
+        vol.write("GAMES>OLD>MOVED.DAT", &pattern(1000), None)
+            .unwrap();
+        vol.write("GAMES>STAYS.DAT", &pattern(300), None).unwrap();
+        // Moved out of OLD: its sectors get the new file number.
+        vol.move_to("GAMES>OLD>MOVED.DAT", "GAMES").unwrap();
+        assert_eq!(vol.validate().unwrap(), []);
+        save(&vol, file);
+    }
+
+    // Bootable disks, from Steve's DOS disks.
+    let sample = |dir: &str, file: &str| {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("samples")
+            .join(dir)
+            .join(file);
+        Some(DiskImage::from_bytes(&std::fs::read(path).ok()?).unwrap())
+    };
+    let boots = [
+        (
+            "DOS 2",
+            "Dos 2.0s.atr",
+            Layout::Dos2Single,
+            "boot-dos20-sd.atr",
+        ),
+        (
+            "DOS 2",
+            "Dos 2.0s.atr",
+            Layout::Dos2Double,
+            "boot-dos20-dd.atr",
+        ),
+        (
+            "DOS 2",
+            "DOS 2.5 (1984)(Atari)(US)[!].atr",
+            Layout::Dos25Enhanced,
+            "boot-dos25-ed.atr",
+        ),
+        (
+            "MyDOS",
+            "MYDOS45D.ATR",
+            Layout::MyDosDouble,
+            "boot-mydos-dd.atr",
+        ),
+        (
+            "MyDOS",
+            "MYDOS45D.ATR",
+            Layout::MyDosSingle,
+            "boot-mydos-sd.atr",
+        ),
+        (
+            "SpartaDOS",
+            "Spartados 3.2g.ATR",
+            Layout::SpartaSingle,
+            "boot-sparta-sd.atr",
+        ),
+        (
+            "SpartaDOS",
+            "Spartados 3.2g.ATR",
+            Layout::SpartaDouble,
+            "boot-sparta-dd.atr",
+        ),
+        (
+            "SpartaDOS",
+            "Spartados 3.2g.ATR",
+            Layout::SpartaEnhanced,
+            "boot-sparta-ed.atr",
+        ),
+    ];
+    for (dir, source, layout, file) in boots {
+        let Some(source) = sample(dir, source) else {
+            continue;
+        };
+        let mut vol = Volume::format(layout, Container::Atr).unwrap();
+        if vol.file_system().has_directories() && vol.file_system() != FileSystem::MyDos {
+            vol.set_volume_name("BOOTABLE").unwrap();
+        }
+        vol.make_bootable(&source).unwrap();
+        vol.write("HELLO.LST", &program, None).unwrap();
+        save(&vol, file);
+    }
+
+    // SpartaDOS flags: hidden and archived files.
+    let mut vol = Volume::format(Layout::SpartaSingle, Container::Atr).unwrap();
+    vol.set_volume_name("FLAGS").unwrap();
+    vol.write("SHOWN.TXT", &text, when(24, 10)).unwrap();
+    vol.write("HIDDEN.TXT", &text, when(24, 11)).unwrap();
+    vol.set_hidden("HIDDEN.TXT", true).unwrap();
+    vol.write("ARCHIVED.TXT", &text, when(24, 12)).unwrap();
+    vol.set_archived("ARCHIVED.TXT", true).unwrap();
+    vol.set_timestamp("SHOWN.TXT", when(1, 23)).unwrap();
+    save(&vol, "sparta-flags.atr");
 }
 
 /// Our blank disks against ones DOS formatted itself (made in AltirraSDL;

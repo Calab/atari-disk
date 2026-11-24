@@ -48,6 +48,7 @@ const BOOT_LEN: usize = 128;
 
 /// The file format holding the sectors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Container {
     /// `.ATR`: a 16-byte header, then the sectors.
     Atr,
@@ -57,6 +58,7 @@ pub enum Container {
 
 /// A common name for the disk's layout, for showing to people.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Density {
     /// 720 sectors of 128 bytes (810 and 1050 drives).
     Single,
@@ -263,6 +265,23 @@ impl DiskImage {
     /// the decision to the program using it.
     pub fn write_protected(&self) -> bool {
         self.atr_extra[15 - 7] & 1 != 0
+    }
+
+    /// Set or clear the ATR write-protect flag (bit 0 of header byte 15).
+    /// XFD files have no header to keep it in, so they give
+    /// [`Error::NotRepresentable`].
+    pub fn set_write_protected(&mut self, on: bool) -> Result<()> {
+        if self.container == Container::Xfd {
+            return Err(Error::NotRepresentable(
+                "an XFD file has no write-protect flag".into(),
+            ));
+        }
+        if on {
+            self.atr_extra[15 - 7] |= 1;
+        } else {
+            self.atr_extra[15 - 7] &= !1;
+        }
+        Ok(())
     }
 
     /// The number of data bytes in sector `n`: 128 for the boot sectors
