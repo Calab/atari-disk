@@ -332,10 +332,12 @@ fn samples_validate() {
     for path in images() {
         let image = DiskImage::from_bytes(&std::fs::read(&path).unwrap()).unwrap();
         let name = path.file_name().unwrap().to_string_lossy().to_string();
-        let Ok(vol) = Volume::open(image) else {
-            println!("{name}: no file system");
+        let vol = Volume::open(image).unwrap();
+        if vol.file_system() == FileSystem::Raw {
+            println!("{name}: no file system (raw)");
+            assert!(matches!(vol.validate(), Err(Error::Unsupported(_))));
             continue;
-        };
+        }
         let problems = vol.validate().unwrap();
         println!(
             "{name}: {:?}, {} problems",
@@ -387,7 +389,9 @@ fn bootable_matches_dos() {
         load("DOS 2", "blank DOS2 DD.atr"),
     ) {
         let mut vol = Volume::format(Layout::Dos2Double, Container::Atr).unwrap();
+        assert!(!vol.is_bootable());
         vol.make_bootable(&dos).unwrap();
+        assert!(vol.is_bootable());
         assert_eq!(boot(vol.image()), boot(&theirs));
         // DUP writes DOS.SYS from memory, so theirs isn't a byte copy;
         // ours is the source's.
@@ -472,6 +476,37 @@ fn bootable_matches_dos() {
             Container::Atr,
         );
         assert!(small.is_err() || small.as_mut().unwrap().make_bootable(&mydos).is_err());
+    }
+}
+
+/// `is_bootable` on Steve's samples: his DOS disks are, his blanks and
+/// SpartaDOS X disks aren't.
+#[test]
+fn samples_is_bootable() {
+    let expected = [
+        ("DOS 2", "Dos 2.0s.atr", true),
+        ("DOS 2", "DOS 2.5 (1984)(Atari)(US)[!].atr", true),
+        ("DOS 2", "blank DOS2.5 ED.atr", false),
+        ("MyDOS", "MYDOS45D.ATR", true),
+        ("MyDOS", "SD MyDOS45.atr", true),
+        ("SpartaDOS", "Spartados 3.2g.ATR", true),
+        ("SpartaDOS", "blank 32.g SD.atr", true),
+        ("SpartaDOS", "blank 32.g DD.atr", false),
+        ("SpartaDOS", "SDX 4.49e Toolkit.atr", false),
+        ("SpartaDOS", "SpartaDOS HDD.atr", false),
+        ("SpartaDOS", "SpartaDOS DD formatted.atr", false),
+    ];
+    for (dir, file, bootable) in expected {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("samples")
+            .join(dir)
+            .join(file);
+        let Ok(bytes) = std::fs::read(path) else {
+            eprintln!("skipping {file} (not found)");
+            continue;
+        };
+        let vol = Volume::open(DiskImage::from_bytes(&bytes).unwrap()).unwrap();
+        assert_eq!(vol.is_bootable(), bootable, "{file}");
     }
 }
 
@@ -705,11 +740,25 @@ fn make_test_disks() {
             continue;
         };
         let mut vol = Volume::format(layout, Container::Atr).unwrap();
-        if vol.file_system().has_directories() && vol.file_system() != FileSystem::MyDos {
+        if vol.features().volume_name {
             vol.set_volume_name("BOOTABLE").unwrap();
         }
         vol.make_bootable(&source).unwrap();
         vol.write("HELLO.LST", &program, None).unwrap();
+        save(&vol, file);
+    }
+
+    // Double-sided disks (XF551: 1440 sectors of 256 bytes).
+    for (layout, file) in [
+        (Layout::SpartaDoubleSided, "sparta-ds.atr"),
+        (Layout::MyDosDoubleSided, "mydos-ds.atr"),
+    ] {
+        let mut vol = Volume::format(layout, Container::Atr).unwrap();
+        if vol.features().volume_name {
+            vol.set_volume_name("DSDD").unwrap();
+        }
+        vol.write("HELLO.LST", &program, None).unwrap();
+        vol.write("BIG.DAT", &pattern(200_000), None).unwrap();
         save(&vol, file);
     }
 

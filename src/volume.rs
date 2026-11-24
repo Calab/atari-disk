@@ -29,9 +29,63 @@ pub enum FileSystem {
     /// MyDOS 4.x: DOS 2's file system with subdirectories and disks of up
     /// to 65535 sectors.
     MyDos,
+    /// No file system this crate knows (or none at all): only the sector
+    /// calls work ([`Volume::read_sector`], [`Volume::write_sector`]);
+    /// file calls give [`Error::Unsupported`].
+    Raw,
+}
+
+/// What a file system can do, from [`FileSystem::features`] or
+/// [`Volume::features`], e.g. to show only the buttons that work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Features {
+    /// Files at all (list, read, write, rename, delete): false only for
+    /// [`FileSystem::Raw`].
+    pub files: bool,
+    /// Directories: `>` paths, [`Volume::make_dir`], [`Volume::move_to`].
+    pub directories: bool,
+    /// Locked files: [`Volume::lock`], [`Volume::unlock`].
+    pub locking: bool,
+    /// Dates on files and directories: [`Volume::set_timestamp`], and
+    /// the `when` of [`Volume::write`].
+    pub dates: bool,
+    /// [`Volume::set_hidden`] and [`Volume::set_archived`].
+    pub hidden_and_archived: bool,
+    /// A volume name: [`Volume::set_volume_name`].
+    pub volume_name: bool,
+    /// Can be made bootable with [`Volume::make_bootable`].
+    pub bootable: bool,
+    /// The most entries one directory holds, if there's a fixed limit
+    /// (64 on DOS 2 and MyDOS).
+    pub max_entries: Option<u32>,
+    /// New names may use `_` (SpartaDOS).
+    pub underscore_in_names: bool,
+    /// New names may start with a digit (SpartaDOS).
+    pub digit_first_in_names: bool,
 }
 
 impl FileSystem {
+    /// What it can do. [`Volume::features`] also knows the disk: a
+    /// 512-byte-sector disk can't be bootable.
+    pub fn features(self) -> Features {
+        let sparta = self.is_sparta();
+        let files = self != FileSystem::Raw;
+        Features {
+            files,
+            directories: self.has_directories(),
+            locking: files,
+            dates: sparta,
+            hidden_and_archived: sparta,
+            volume_name: sparta,
+            // SpartaDOS X boots from its cartridge.
+            bootable: files && self != FileSystem::SpartaDosX,
+            max_entries: (files && !sparta).then_some(64),
+            underscore_in_names: sparta,
+            digit_first_in_names: sparta,
+        }
+    }
+
     /// Does it have directories (so `>` paths, [`Volume::make_dir`] and
     /// [`Volume::move_to`])?
     pub fn has_directories(self) -> bool {
@@ -39,11 +93,6 @@ impl FileSystem {
             self,
             FileSystem::SpartaDos | FileSystem::SpartaDosX | FileSystem::MyDos
         )
-    }
-
-    /// Does it keep dates, hidden and archive flags (SpartaDOS)?
-    pub fn has_dates(self) -> bool {
-        matches!(self, FileSystem::SpartaDos | FileSystem::SpartaDosX)
     }
 
     fn is_sparta(self) -> bool {
@@ -85,6 +134,70 @@ pub enum Layout {
     /// MyDOS with any number of sectors (369 to 65535) of 128 or 256
     /// bytes, e.g. 65535 × 256 for a hard disk partition.
     MyDosCustom { sectors: u32, sector_size: usize },
+    /// SpartaDOS double-sided double density, as on an XF551: 1440
+    /// sectors of 256 bytes (360 KB), 40 tracks a side.
+    SpartaDoubleSided,
+    /// SpartaDOS double-sided double density with 80 tracks a side: 2880
+    /// sectors of 256 bytes (720 KB).
+    SpartaDoubleSided80,
+    /// MyDOS double-sided double density, as on an XF551: 1440 sectors of
+    /// 256 bytes.
+    MyDosDoubleSided,
+    /// MyDOS double-sided double density with 80 tracks a side: 2880
+    /// sectors of 256 bytes.
+    MyDosDoubleSided80,
+    /// No file system: `sectors` sectors of `sector_size` bytes (128, 256
+    /// or 512), all zeros, for programs that write their own sectors.
+    Raw { sectors: u32, sector_size: usize },
+}
+
+impl Layout {
+    /// The file system a disk formatted this way has.
+    pub fn file_system(self) -> FileSystem {
+        match self {
+            Layout::Dos2Single | Layout::Dos2Double => FileSystem::Dos2,
+            Layout::Dos25Enhanced => FileSystem::Dos25Enhanced,
+            Layout::SpartaCustom {
+                sector_size: 512, ..
+            } => FileSystem::SpartaDosX,
+            Layout::SpartaSingle
+            | Layout::SpartaEnhanced
+            | Layout::SpartaDouble
+            | Layout::SpartaCustom { .. }
+            | Layout::SpartaDoubleSided
+            | Layout::SpartaDoubleSided80 => FileSystem::SpartaDos,
+            Layout::MyDosSingle
+            | Layout::MyDosEnhanced
+            | Layout::MyDosDouble
+            | Layout::MyDosCustom { .. }
+            | Layout::MyDosDoubleSided
+            | Layout::MyDosDoubleSided80 => FileSystem::MyDos,
+            Layout::Raw { .. } => FileSystem::Raw,
+        }
+    }
+
+    /// The sectors and their size: `(count, bytes)`.
+    pub fn geometry(self) -> (u32, usize) {
+        match self {
+            Layout::Dos2Single | Layout::SpartaSingle | Layout::MyDosSingle => (720, 128),
+            Layout::Dos2Double | Layout::SpartaDouble | Layout::MyDosDouble => (720, 256),
+            Layout::Dos25Enhanced | Layout::SpartaEnhanced | Layout::MyDosEnhanced => (1040, 128),
+            Layout::SpartaDoubleSided | Layout::MyDosDoubleSided => (1440, 256),
+            Layout::SpartaDoubleSided80 | Layout::MyDosDoubleSided80 => (2880, 256),
+            Layout::SpartaCustom {
+                sectors,
+                sector_size,
+            }
+            | Layout::MyDosCustom {
+                sectors,
+                sector_size,
+            }
+            | Layout::Raw {
+                sectors,
+                sector_size,
+            } => (sectors, sector_size),
+        }
+    }
 }
 
 /// Is a directory entry a file or a directory?
@@ -241,18 +354,38 @@ impl Volume {
         })
     }
 
-    /// Open the file system on `image`. Fails with
-    /// [`Error::UnknownFileSystem`] when [`Volume::detect`] finds none.
+    /// Open the file system on `image`. When [`Volume::detect`] finds
+    /// none, the volume is [`FileSystem::Raw`]: the sector calls work and
+    /// the file calls give [`Error::Unsupported`]. (Ask
+    /// [`Volume::detect`] first to tell a disk with no file system from
+    /// one with.)
     pub fn open(image: DiskImage) -> Result<Self> {
-        let fs = Self::detect(&image).ok_or_else(|| {
-            Error::UnknownFileSystem("not a DOS 2, MyDOS or SpartaDOS disk".into())
-        })?;
-        Ok(Self {
+        let fs = Self::detect(&image).unwrap_or(FileSystem::Raw);
+        Ok(Self::with(image, fs))
+    }
+
+    /// Open `image` as [`FileSystem::Raw`] whatever it holds: sectors
+    /// only, e.g. to repair a damaged disk by hand.
+    pub fn open_raw(image: DiskImage) -> Self {
+        Self::with(image, FileSystem::Raw)
+    }
+
+    fn with(image: DiskImage, fs: FileSystem) -> Self {
+        Self {
             image,
             fs,
             uppercase: false,
             overwrite: false,
-        })
+        }
+    }
+
+    /// What this disk's file system can do (see [`Features`]).
+    pub fn features(&self) -> Features {
+        let mut f = self.fs.features();
+        if self.image.sector_size() > 256 {
+            f.bootable = false;
+        }
+        f
     }
 
     /// A blank, formatted data disk. A SpartaDOS one has no volume name
@@ -276,6 +409,20 @@ impl Volume {
                 sectors,
                 sector_size,
             } => mydos(container, sector_size, sectors)?,
+            Layout::SpartaDoubleSided => sparta::format(container, 256, 1440, b"")?,
+            Layout::SpartaDoubleSided80 => sparta::format(container, 256, 2880, b"")?,
+            Layout::MyDosDoubleSided => mydos(container, 256, 1440)?,
+            Layout::MyDosDoubleSided80 => mydos(container, 256, 2880)?,
+            Layout::Raw {
+                sectors,
+                sector_size,
+            } => {
+                return Ok(Self::open_raw(DiskImage::new(
+                    container,
+                    sector_size,
+                    sectors,
+                )?));
+            }
         };
         Self::open(image)
     }
@@ -640,6 +787,35 @@ impl Volume {
         self.change_sparta(|w| w.make_dir(map, &name, when))
     }
 
+    /// Is the disk set up to boot a DOS? Only the boot sector is looked
+    /// at, not whether the DOS it points to is really there or works:
+    ///
+    /// * DOS 2 and MyDOS: sector 1 loads at least one sector, says DOS.SYS
+    ///   is present (byte `$0E`), and points to a sector on the disk for
+    ///   it (bytes `$0F`-`$10`).
+    /// * SpartaDOS: sector 1 loads at least one sector and points to a
+    ///   boot file's sector map on the disk (bytes `$28`-`$29`).
+    ///
+    /// Blank data disks from [`Volume::format`] aren't bootable; nor are
+    /// raw disks, disks with 512-byte sectors, or SpartaDOS X disks
+    /// (which boot from the cartridge).
+    pub fn is_bootable(&self) -> bool {
+        if self.fs == FileSystem::Raw || self.image.sector_size() > 256 {
+            return false;
+        }
+        let Ok(s1) = self.image.sector(1) else {
+            return false;
+        };
+        let on_disk = |n: u16| (4..=self.image.sector_count()).contains(&u32::from(n));
+        let word = |at: usize| u16::from_le_bytes([s1[at], s1[at + 1]]);
+        s1[1] != 0
+            && if self.fs.is_sparta() {
+                on_disk(word(0x28))
+            } else {
+                s1[0x0E] != 0 && on_disk(word(0x0F))
+            }
+    }
+
     /// Make this disk bootable with the DOS on `source`, a bootable disk
     /// of the same kind (the program loads it; this crate reads no
     /// files). Nothing copyrighted comes with this crate: the DOS is
@@ -664,9 +840,16 @@ impl Volume {
         if self.image.sector_size() > 256 {
             return not("the Atari can't boot from 512-byte sectors");
         }
-        let src = Volume::open(source.clone()).map_err(|_| {
-            Error::NotBootable("the source disk has no DOS 2, MyDOS or SpartaDOS".into())
-        })?;
+        if !self.features().bootable {
+            return not(match self.fs {
+                FileSystem::SpartaDosX => "SpartaDOS X boots from its cartridge, not the disk",
+                _ => "this disk has no file system",
+            });
+        }
+        let src = Volume::open(source.clone())?;
+        if src.fs == FileSystem::Raw {
+            return not("the source disk has no DOS 2, MyDOS or SpartaDOS");
+        }
         let family = |fs: FileSystem| match fs {
             FileSystem::Dos2 | FileSystem::Dos25Enhanced => 0,
             FileSystem::MyDos => 1,
@@ -769,6 +952,9 @@ impl Volume {
     }
 
     fn check(&self) -> Result<(Vec<SectorUse>, Vec<Problem>)> {
+        if self.fs == FileSystem::Raw {
+            return Err(raw());
+        }
         let result = if self.fs.is_sparta() {
             check::sparta(&self.image)
         } else {
@@ -778,18 +964,19 @@ impl Volume {
     }
 
     fn need_dirs(&self) -> Result<()> {
-        if self.fs.has_directories() {
-            Ok(())
-        } else {
-            Err(no_dirs())
+        match self.fs {
+            FileSystem::Raw => Err(raw()),
+            fs if fs.has_directories() => Ok(()),
+            _ => Err(no_dirs()),
         }
     }
 
     fn need_sparta(&self, what: &str) -> Result<()> {
-        if self.fs.is_sparta() {
-            Ok(())
-        } else {
-            Err(Error::Unsupported(format!("DOS 2 has no {what}")))
+        match self.fs {
+            FileSystem::Raw => Err(raw()),
+            fs if fs.is_sparta() => Ok(()),
+            FileSystem::MyDos => Err(Error::Unsupported(format!("MyDOS has no {what}"))),
+            _ => Err(Error::Unsupported(format!("DOS 2 has no {what}"))),
         }
     }
 
@@ -809,11 +996,17 @@ impl Volume {
     }
 
     fn dos2(&self) -> Result<Dos2<'_>> {
+        if self.fs == FileSystem::Raw {
+            return Err(raw());
+        }
         // A direct sector write may have broken it.
         Dos2::open(&self.image).map_err(|e| Error::Damaged(e.to_string()))
     }
 
     fn sparta(&self) -> Result<Sparta<'_>> {
+        if self.fs == FileSystem::Raw {
+            return Err(raw());
+        }
         if !self.fs.is_sparta() {
             return Err(Error::Unsupported("not a SpartaDOS disk".into()));
         }
@@ -932,6 +1125,10 @@ fn sparta_entry(e: &sparta::Entry) -> DirEntry {
 
 fn mydos(container: Container, size: usize, count: u32) -> Result<DiskImage> {
     dos2::format(container, dos2::Kind::MyDos { size, count })
+}
+
+fn raw() -> Error {
+    Error::Unsupported("a raw disk has no file system, only sectors".into())
 }
 
 fn no_dirs() -> Error {
@@ -1841,5 +2038,184 @@ mod tests {
             matches!(&problems[..], [Problem::Damaged { path, .. }, ..] if path == b"F"),
             "{problems:?}"
         );
+    }
+
+    // ---- Raw volumes, named layouts, features ----
+
+    #[test]
+    fn raw_volumes_have_only_sectors() {
+        let mut vol = Volume::format(
+            Layout::Raw {
+                sectors: 100,
+                sector_size: 256,
+            },
+            Container::Atr,
+        )
+        .unwrap();
+        assert_eq!(vol.file_system(), FileSystem::Raw);
+        assert!(!vol.features().files);
+        assert_eq!(vol.image().sector_count(), 100);
+        for result in [
+            vol.list("").map(|_| ()),
+            vol.read("X").map(|_| ()),
+            vol.write("X", b"x", None),
+            vol.make_dir("D", None),
+            vol.set_volume_name("V"),
+            vol.validate().map(|_| ()),
+            vol.make_bootable(&DiskImage::new(Container::Atr, 128, 720).unwrap()),
+        ] {
+            assert!(
+                matches!(result, Err(Error::Unsupported(_) | Error::NotBootable(_))),
+                "{result:?}"
+            );
+        }
+        assert_eq!(vol.free_sectors(), 0);
+        vol.write_sector(10, &[7; 256]).unwrap();
+        assert_eq!(vol.read_sector(10).unwrap(), [7; 256]);
+        // An unknown disk opens as raw; a known one can be forced raw.
+        let blank = DiskImage::new(Container::Atr, 128, 720).unwrap();
+        assert_eq!(Volume::detect(&blank), None);
+        assert_eq!(Volume::open(blank).unwrap().file_system(), FileSystem::Raw);
+        let dos = blank_image();
+        assert_eq!(Volume::open_raw(dos.clone()).file_system(), FileSystem::Raw);
+        // Writing a whole file system onto a raw disk makes it that.
+        let mut vol = Volume::format(
+            Layout::Raw {
+                sectors: 720,
+                sector_size: 128,
+            },
+            Container::Atr,
+        )
+        .unwrap();
+        for n in 1..=720 {
+            vol.write_sector(n, dos.sector(n).unwrap()).unwrap();
+        }
+        assert_eq!(vol.file_system(), FileSystem::Dos2);
+        assert_eq!(vol.list("").unwrap().len(), 0);
+    }
+
+    fn blank_image() -> DiskImage {
+        blank().into_image()
+    }
+
+    #[test]
+    fn named_layouts() {
+        for (layout, fs, count, size) in [
+            (Layout::SpartaDoubleSided, FileSystem::SpartaDos, 1440, 256),
+            (
+                Layout::SpartaDoubleSided80,
+                FileSystem::SpartaDos,
+                2880,
+                256,
+            ),
+            (Layout::MyDosDoubleSided, FileSystem::MyDos, 1440, 256),
+            (Layout::MyDosDoubleSided80, FileSystem::MyDos, 2880, 256),
+            (Layout::Dos25Enhanced, FileSystem::Dos25Enhanced, 1040, 128),
+            (
+                Layout::SpartaCustom {
+                    sectors: 4000,
+                    sector_size: 512,
+                },
+                FileSystem::SpartaDosX,
+                4000,
+                512,
+            ),
+        ] {
+            assert_eq!(layout.file_system(), fs, "{layout:?}");
+            assert_eq!(layout.geometry(), (count, size), "{layout:?}");
+            let mut vol = Volume::format(layout, Container::Atr).unwrap();
+            assert_eq!(vol.file_system(), fs, "{layout:?}");
+            assert_eq!(vol.image().sector_count(), count);
+            assert_eq!(vol.image().sector_size(), size);
+            vol.write("A.DAT", &[5; 2000], None).unwrap();
+            assert_eq!(vol.validate().unwrap(), []);
+        }
+        // SpartaDOS's sector 1 says double-sided: tracks byte $1E.
+        let vol = Volume::format(Layout::SpartaDoubleSided, Container::Atr).unwrap();
+        assert_eq!(vol.read_sector(1).unwrap()[0x1E], 0x80 | 40);
+        let vol = Volume::format(Layout::SpartaDoubleSided80, Container::Atr).unwrap();
+        assert_eq!(vol.read_sector(1).unwrap()[0x1E], 0x80 | 80);
+    }
+
+    #[test]
+    fn features_say_what_works() {
+        let dos = FileSystem::Dos2.features();
+        assert!(dos.files && dos.locking && dos.bootable);
+        assert!(!dos.directories && !dos.dates && !dos.volume_name);
+        assert_eq!(dos.max_entries, Some(64));
+        let mydos = FileSystem::MyDos.features();
+        assert!(mydos.directories && !mydos.dates && mydos.bootable);
+        let sparta = FileSystem::SpartaDos.features();
+        assert!(sparta.directories && sparta.dates && sparta.hidden_and_archived);
+        assert!(sparta.volume_name && sparta.bootable && sparta.underscore_in_names);
+        assert_eq!(sparta.max_entries, None);
+        assert!(!FileSystem::SpartaDosX.features().bootable);
+        let raw = FileSystem::Raw.features();
+        assert!(!raw.files && !raw.locking && !raw.bootable);
+        // A 512-byte disk can't boot.
+        let big = Volume::format(
+            Layout::MyDosCustom {
+                sectors: 1000,
+                sector_size: 256,
+            },
+            Container::Atr,
+        )
+        .unwrap();
+        assert!(big.features().bootable);
+        // The features match what the calls do.
+        let mut vol = blank();
+        assert_eq!(vol.features(), FileSystem::Dos2.features());
+        assert!(vol.make_dir("D", None).is_err());
+        let mut sdx = Volume::format(
+            Layout::SpartaCustom {
+                sectors: 2000,
+                sector_size: 512,
+            },
+            Container::Atr,
+        )
+        .unwrap();
+        assert!(!sdx.features().bootable);
+        assert!(matches!(
+            sdx.make_bootable(blank().image()),
+            Err(Error::NotBootable(_))
+        ));
+    }
+
+    #[test]
+    fn is_bootable_reads_the_boot_sector() {
+        for layout in [
+            Layout::Dos2Single,
+            Layout::MyDosDouble,
+            Layout::SpartaSingle,
+            Layout::Raw {
+                sectors: 720,
+                sector_size: 128,
+            },
+        ] {
+            let vol = Volume::format(layout, Container::Atr).unwrap();
+            assert!(!vol.is_bootable(), "{layout:?}");
+        }
+        // A DOS 2 boot sector pointing at sector 4.
+        let mut vol = blank();
+        let mut s1 = vol.read_sector(1).unwrap().to_vec();
+        s1[1] = 3;
+        s1[0x0E] = 1;
+        s1[0x0F] = 4;
+        vol.write_sector(1, &s1).unwrap();
+        assert!(vol.is_bootable());
+        // Pointing off the disk, or with "no DOS", it isn't.
+        s1[0x10] = 0xFF;
+        vol.write_sector(1, &s1).unwrap();
+        assert!(!vol.is_bootable());
+        s1[0x10] = 0;
+        s1[0x0E] = 0;
+        vol.write_sector(1, &s1).unwrap();
+        assert!(!vol.is_bootable());
+        // SpartaDOS: the boot file's map.
+        let mut vol = sparta_blank();
+        let mut s1 = vol.read_sector(1).unwrap().to_vec();
+        s1[0x28] = 5;
+        vol.write_sector(1, &s1).unwrap();
+        assert!(vol.is_bootable());
     }
 }

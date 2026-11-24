@@ -42,4 +42,4 @@ pub use dos2::{Dos2, Entry as Dos2Entry};
 pub use error::{Error, Result};
 pub use image::{Container, Density, DiskImage};
 pub use sparta::{Entry as SpartaEntry, Sparta, Timestamp};
-pub use volume::{DirEntry, EntryKind, FileSystem, Layout, Volume};
+pub use volume::{DirEntry, EntryKind, Features, FileSystem, Layout, Volume};
