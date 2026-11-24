@@ -22,6 +22,11 @@ pub enum Error {
     /// XFD images have no header, so they can only hold layouts that
     /// can be recognised from the file size alone.
     NotRepresentable(String),
+    /// The disk doesn't hold the file system asked for; the text says why.
+    UnknownFileSystem(String),
+    /// The file system's own records don't add up (e.g. a file's sectors
+    /// lead off the disk); the text says where.
+    Damaged(String),
 }
 
 impl fmt::Display for Error {
@@ -41,6 +46,8 @@ impl fmt::Display for Error {
                 "sector {sector} holds {expected} bytes, but {got} were given"
             ),
             Error::NotRepresentable(why) => write!(f, "can't be saved that way: {why}"),
+            Error::UnknownFileSystem(why) => write!(f, "unknown file system ({why})"),
+            Error::Damaged(why) => write!(f, "damaged: {why}"),
         }
     }
 }
