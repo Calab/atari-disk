@@ -17,7 +17,7 @@
 //!
 //!   | Bytes | Meaning |
 //!   |---|---|
-//!   | 0 | Flags: `$80` deleted, `$40` in use, `$20` locked, `$02` made by DOS 2, `$01` open for writing |
+//!   | 0 | Flags: `$80` deleted, `$40` in use, `$20` locked, `$02` made by DOS 2, `$01` open for writing (or see below) |
 //!   | 1–2 | Length in sectors |
 //!   | 3–4 | First sector |
 //!   | 5–12 | Name, padded with spaces |
@@ -35,6 +35,12 @@
 //!   VTOC bitmap for sectors 48–719, bytes 84–121 cover sectors 720–1023,
 //!   and bytes 122–123 count the free ones. DOS 2.0 sees only the first
 //!   VTOC, so on such a disk it shows fewer free sectors than DOS 2.5.
+//!
+//!   A file that uses sectors above 719 has flags `$03` (`$23` locked):
+//!   "in use" is clear so DOS 2.0 ignores it, and DOS 2.5 lists it in
+//!   angle brackets, `<BIG     DAT>`. (From DOS 2.5's DOS.SYS: an entry is
+//!   a file if its flags AND `$43` are `$03`, or bit 0 is clear; DIR
+//!   prints the brackets when bit 0 is set.)
 
 use crate::error::{Error, Result};
 use crate::image::DiskImage;
@@ -52,6 +58,7 @@ const BITMAP: usize = 10;
 const DELETED: u8 = 0x80;
 const IN_USE: u8 = 0x40;
 const LOCKED: u8 = 0x20;
+const MADE_BY_DOS2: u8 = 0x02;
 const OPEN: u8 = 0x01;
 
 /// A DOS 2 disk, read from a [`DiskImage`].
@@ -106,7 +113,13 @@ impl Entry {
     /// The file was opened for writing and never closed (the Atari was
     /// switched off or crashed), so its length may be wrong.
     pub fn open_for_writing(&self) -> bool {
-        self.flags & OPEN != 0
+        self.flags & (IN_USE | OPEN) == IN_USE | OPEN
+    }
+
+    /// A DOS 2.5 file using sectors above 719 (flags `$03`): DOS 2.5
+    /// shows it in angle brackets, and DOS 2.0 doesn't see it.
+    pub fn above_720(&self) -> bool {
+        self.flags & (IN_USE | MADE_BY_DOS2 | OPEN) == MADE_BY_DOS2 | OPEN
     }
 }
 
@@ -185,20 +198,12 @@ impl<'a> Dos2<'a> {
     /// Is sector `n` marked free in the VTOC (or, from 720 up on an
     /// enhanced disk, the second VTOC)?
     pub fn is_free(&self, n: u32) -> bool {
-        let (sector, byte) = if n < 720 {
-            (VTOC, BITMAP + n as usize / 8)
-        } else if self.enhanced && n < VTOC2 {
-            (VTOC2, n as usize / 8 - 6)
-        } else {
-            // MyDOS and DOS 2.0D-style double-density disks can mark
-            // sector 720 in byte 100 of the VTOC.
-            (VTOC, BITMAP + n as usize / 8)
-        };
+        let (sector, byte, mask) = bit_at(self.enhanced, n);
         self.image
             .sector(sector)
             .ok()
             .and_then(|s| s.get(byte))
-            .is_some_and(|b| b & (0x80 >> (n % 8)) != 0)
+            .is_some_and(|b| b & mask != 0)
     }
 
     /// The files in the directory, in directory order. Deleted entries
@@ -210,7 +215,8 @@ impl<'a> Dos2<'a> {
             if flags == 0 {
                 break;
             }
-            if flags & DELETED != 0 || flags & IN_USE == 0 {
+            let dos25 = flags & (IN_USE | MADE_BY_DOS2 | OPEN) == MADE_BY_DOS2 | OPEN;
+            if flags & DELETED != 0 || (flags & IN_USE == 0 && !dos25) {
                 continue;
             }
             let mut entry = Entry {
@@ -224,7 +230,9 @@ impl<'a> Dos2<'a> {
                 damaged: false,
             };
             let mut size = 0;
-            entry.damaged = self.walk(&entry, |data| size += data.len() as u32).is_err();
+            entry.damaged = self
+                .walk(&entry, |_, data| size += data.len() as u32)
+                .is_err();
             entry.size = size;
             out.push(entry);
         }
@@ -244,7 +252,7 @@ impl<'a> Dos2<'a> {
     /// back into the chain.
     pub fn read(&self, entry: &Entry) -> Result<Vec<u8>> {
         let mut out = Vec::with_capacity(entry.size as usize);
-        self.walk(entry, |data| out.extend_from_slice(data))?;
+        self.walk(entry, |_, data| out.extend_from_slice(data))?;
         Ok(out)
     }
 
@@ -264,8 +272,9 @@ impl<'a> Dos2<'a> {
         })
     }
 
-    /// Follow a file's sectors, handing each one's data to `each`.
-    fn walk(&self, entry: &Entry, mut each: impl FnMut(&[u8])) -> Result<()> {
+    /// Follow a file's sectors, handing each one's number and data to
+    /// `each`. A sector is handed over only once it has passed the checks.
+    fn walk(&self, entry: &Entry, mut each: impl FnMut(u32, &[u8])) -> Result<()> {
         let name = entry.file_name();
         let damaged = |why: String| Err(Error::Damaged(format!("{name}: {why}")));
         let data_len = self.image.sector_size() - 3;
@@ -294,11 +303,295 @@ impl<'a> Dos2<'a> {
             if count > data_len {
                 return damaged(format!("sector {n} claims {count} bytes"));
             }
-            each(&sector[..count]);
+            each(n, &sector[..count]);
             n = u32::from(link[0] & 3) << 8 | u32::from(link[1]);
         }
         Ok(())
     }
+}
+
+// ---------------------------------------------------------------------
+// Changing a disk. These work on the image directly. `Volume` calls them
+// on a copy and keeps the copy only if they succeed, so a failure part
+// way through leaves the disk as it was.
+
+/// Where sector `n`'s bit is in the bitmaps: (sector, byte, mask).
+fn bit_at(enhanced: bool, n: u32) -> (u32, usize, u8) {
+    let mask = 0x80 >> (n % 8);
+    if enhanced && (720..VTOC2).contains(&n) {
+        (VTOC2, n as usize / 8 - 6, mask)
+    } else {
+        // Also sector 720 on MyDOS-style double-density disks, in byte
+        // 100 of the VTOC.
+        (VTOC, BITMAP + n as usize / 8, mask)
+    }
+}
+
+/// Mark sector `n` free or in use, keeping the free counts (and, on an
+/// enhanced disk, the second VTOC's copy of the bitmap) in step.
+fn mark(image: &mut DiskImage, enhanced: bool, n: u32, free: bool) -> Result<()> {
+    let (sector, byte, mask) = bit_at(enhanced, n);
+    let was_free = image
+        .sector(sector)?
+        .get(byte)
+        .is_some_and(|b| b & mask != 0);
+    if was_free == free {
+        return Ok(());
+    }
+    let mut places = vec![(sector, byte)];
+    if enhanced && (48..720).contains(&n) {
+        places.push((VTOC2, n as usize / 8 - 6));
+    }
+    for (sector, byte) in places {
+        let b = image
+            .sector_mut(sector)?
+            .get_mut(byte)
+            .ok_or_else(|| Error::Damaged(format!("sector {n} is outside the VTOC")))?;
+        if free {
+            *b |= mask;
+        } else {
+            *b &= !mask;
+        }
+    }
+    let (sector, at) = if enhanced && n >= 720 {
+        (VTOC2, 122)
+    } else {
+        (VTOC, 3)
+    };
+    let counts = image.sector_mut(sector)?;
+    let count = word(counts, at);
+    let count = if free {
+        count.saturating_add(1)
+    } else {
+        count.saturating_sub(1)
+    };
+    counts[at..at + 2].copy_from_slice(&count.to_le_bytes());
+    Ok(())
+}
+
+/// The free data sectors, lowest first (as DOS 2 takes them). Sectors DOS
+/// keeps for itself are left out even if the bitmap says they're free.
+fn free_list(image: &DiskImage) -> Result<Vec<u32>> {
+    let fs = Dos2::open(image)?;
+    // The 10-bit sector links can't reach past 1023.
+    let last = image.sector_count().min(VTOC2 - 1);
+    Ok((4..=last)
+        .filter(|n| !(VTOC..DIR_FIRST + DIR_SECTORS).contains(n))
+        .filter(|&n| fs.is_free(n))
+        .collect())
+}
+
+/// A directory entry's 16 bytes, to change.
+fn raw_entry_mut(image: &mut DiskImage, index: u8) -> Result<&mut [u8]> {
+    let sector = image.sector_mut(DIR_FIRST + u32::from(index) / ENTRIES_PER_SECTOR as u32)?;
+    let at = usize::from(index) % ENTRIES_PER_SECTOR * ENTRY_LEN;
+    Ok(&mut sector[at..at + ENTRY_LEN])
+}
+
+/// Mark the sectors of `entry` free. Only the sectors that pass the
+/// checks in [`Dos2::read`] are freed: in a damaged chain, the sectors
+/// from the damage on may belong to another file.
+fn free_chain(image: &mut DiskImage, entry: &Entry) -> Result<()> {
+    let fs = Dos2::open(image)?;
+    let enhanced = fs.enhanced();
+    let mut sectors = Vec::new();
+    // Damage just ends the list.
+    let _ = fs.walk(entry, |n, _| sectors.push(n));
+    for n in sectors {
+        mark(image, enhanced, n, true)?;
+    }
+    Ok(())
+}
+
+/// Write a file called `name` holding `data`. If `old` is given (a file
+/// of the same name), it's replaced and keeps its place in the
+/// directory; otherwise the first unused or deleted entry is taken.
+pub(crate) fn write(
+    image: &mut DiskImage,
+    old: Option<&Entry>,
+    name: &[u8; 11],
+    data: &[u8],
+) -> Result<()> {
+    let enhanced = Dos2::open(image)?.enhanced();
+    let index = match old {
+        Some(old) => {
+            free_chain(image, old)?;
+            old.index
+        }
+        None => free_entry(image)?,
+    };
+    let per_sector = image.sector_size() - 3;
+    // DOS 2 gives even an empty file one sector.
+    let chunks: Vec<&[u8]> = if data.is_empty() {
+        vec![&[]]
+    } else {
+        data.chunks(per_sector).collect()
+    };
+    let free = free_list(image)?;
+    if free.len() < chunks.len() {
+        return Err(Error::DiskFull {
+            needed: chunks.len() as u32,
+            free: free.len() as u32,
+        });
+    }
+    for (i, chunk) in chunks.iter().enumerate() {
+        let n = free[i];
+        let next = if i + 1 < chunks.len() { free[i + 1] } else { 0 };
+        let sector = image.sector_mut(n)?;
+        sector.fill(0);
+        sector[..chunk.len()].copy_from_slice(chunk);
+        sector[per_sector] = index << 2 | (next >> 8) as u8;
+        sector[per_sector + 1] = next as u8;
+        sector[per_sector + 2] = chunk.len() as u8;
+        mark(image, enhanced, n, false)?;
+    }
+    let used = &free[..chunks.len()];
+    let raw = raw_entry_mut(image, index)?;
+    // As DOS 2.5 does: a file reaching above sector 719 is hidden from
+    // DOS 2.0, which can't free those sectors.
+    raw[0] = if used.iter().any(|&n| n >= 720) {
+        MADE_BY_DOS2 | OPEN
+    } else {
+        IN_USE | MADE_BY_DOS2
+    };
+    raw[1..3].copy_from_slice(&(chunks.len() as u16).to_le_bytes());
+    raw[3..5].copy_from_slice(&(free[0] as u16).to_le_bytes());
+    raw[5..16].copy_from_slice(name);
+    Ok(())
+}
+
+/// The first directory entry that's unused or deleted.
+fn free_entry(image: &DiskImage) -> Result<u8> {
+    Dos2::open(image)?
+        .raw_entries()
+        .find(|(_, raw)| raw[0] == 0 || raw[0] & DELETED != 0)
+        .map(|(index, _)| index)
+        .ok_or(Error::DirectoryFull)
+}
+
+/// Delete a file: free its sectors and mark its entry deleted. As in DOS
+/// 2, the rest of the entry is left, so undelete tools can still find
+/// it.
+pub(crate) fn delete(image: &mut DiskImage, entry: &Entry) -> Result<()> {
+    free_chain(image, entry)?;
+    raw_entry_mut(image, entry.index)?[0] = DELETED;
+    Ok(())
+}
+
+/// Give a file a new name (already checked).
+pub(crate) fn rename(image: &mut DiskImage, entry: &Entry, name: &[u8; 11]) -> Result<()> {
+    raw_entry_mut(image, entry.index)?[5..16].copy_from_slice(name);
+    Ok(())
+}
+
+/// Lock or unlock a file.
+pub(crate) fn set_locked(image: &mut DiskImage, entry: &Entry, locked: bool) -> Result<()> {
+    let raw = raw_entry_mut(image, entry.index)?;
+    if locked {
+        raw[0] |= LOCKED;
+    } else {
+        raw[0] &= !LOCKED;
+    }
+    Ok(())
+}
+
+/// The DOS 2 disk layouts [`format`] can make.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Kind {
+    /// 720 × 128 bytes, 707 free (DOS 2.0S, 2.5).
+    Single,
+    /// 720 × 256 bytes, 707 free (DOS 2.0D).
+    Double,
+    /// 1040 × 128 bytes, 1010 free (DOS 2.5).
+    Enhanced,
+}
+
+/// The boot sector of a blank data disk: a few bytes of our own (DOS's
+/// boot code can't be shipped) that make the Atari behave as with a
+/// disk formatted by DOS but without DOS on it. The OS loads 1 sector at
+/// $0700 and calls $0706, which sets the carry flag and returns. The OS
+/// takes that as a failed boot, prints BOOT ERROR and tries again.
+const DATA_DISK_BOOT: [u8; 8] = [
+    0x00, // flags
+    0x01, // sectors to load
+    0x00, 0x07, // load at $0700
+    0x07, 0x07, // DOSINI: the RTS below (not used, as the boot fails)
+    0x38, // $0706: SEC
+    0x60, // $0707: RTS
+];
+
+/// A blank DOS 2 data disk: VTOC, an empty directory, and a boot sector
+/// that gives BOOT ERROR ([`DATA_DISK_BOOT`]).
+pub(crate) fn format(container: crate::Container, kind: Kind) -> Result<DiskImage> {
+    let (sector_size, count, total) = match kind {
+        Kind::Single => (128, 720, 707u16),
+        Kind::Double => (256, 720, 707),
+        Kind::Enhanced => (128, 1040, 1010),
+    };
+    let enhanced = kind == Kind::Enhanced;
+    let mut image = DiskImage::new(container, sector_size, count)?;
+    image.sector_mut(1)?[..DATA_DISK_BOOT.len()].copy_from_slice(&DATA_DISK_BOOT);
+    let vtoc = image.sector_mut(VTOC)?;
+    vtoc[0] = 2;
+    vtoc[1..3].copy_from_slice(&total.to_le_bytes());
+    // `mark` counts the free sectors up from 0. Sector 720 stays in use,
+    // as DOS 2 leaves it (the 810 drive can't always read it); on an
+    // enhanced disk so does 1024, the second VTOC.
+    let data = (4..720).chain(if enhanced { 721..VTOC2 } else { 0..0 });
+    for n in data.filter(|n| !(VTOC..DIR_FIRST + DIR_SECTORS).contains(n)) {
+        mark(&mut image, enhanced, n, true)?;
+    }
+    Ok(image)
+}
+
+/// Turn `name` into the 11 bytes of a directory entry, checking it
+/// follows DOS 2's rules: a name of 1–8 letters and digits starting with
+/// a letter, then optionally a dot and an extension of up to 3 letters
+/// and digits. With `uppercase`, lower-case letters are turned into
+/// capitals first; without it they're refused.
+pub(crate) fn parse_name(name: &str, uppercase: bool) -> Result<[u8; 11]> {
+    let bad = |why: &str| Err(Error::BadName(format!("{name}: {why}")));
+    let text = if uppercase {
+        name.to_ascii_uppercase()
+    } else {
+        name.to_string()
+    };
+    let (base, ext) = text.split_once('.').unwrap_or((&text, ""));
+    if base.is_empty() || base.len() > 8 {
+        return bad("the name must be 1 to 8 characters");
+    }
+    if ext.len() > 3 {
+        return bad("the extension can be at most 3 characters");
+    }
+    let ok = |c: char| c.is_ascii_uppercase() || c.is_ascii_digit();
+    if !base.chars().chain(ext.chars()).all(ok) {
+        return if text.chars().any(|c| c.is_ascii_lowercase()) {
+            bad("lower-case letters aren't allowed")
+        } else {
+            bad("only letters A-Z and digits 0-9 are allowed")
+        };
+    }
+    if !base.starts_with(|c: char| c.is_ascii_uppercase()) {
+        return bad("the name must start with a letter");
+    }
+    let mut out = [b' '; 11];
+    out[..base.len()].copy_from_slice(base.as_bytes());
+    out[8..8 + ext.len()].copy_from_slice(ext.as_bytes());
+    Ok(out)
+}
+
+/// The 11 bytes `name` would be stored as, without checking DOS's rules,
+/// to find files already on a disk whatever their names. `None` if it
+/// can't be the name of any file.
+pub(crate) fn stored_name(name: &str) -> Option<[u8; 11]> {
+    let (base, ext) = name.split_once('.').unwrap_or((name, ""));
+    if base.len() > 8 || ext.len() > 3 {
+        return None;
+    }
+    let mut out = [b' '; 11];
+    out[..base.len()].copy_from_slice(base.as_bytes());
+    out[8..8 + ext.len()].copy_from_slice(ext.as_bytes());
+    Some(out)
 }
 
 /// A little-endian 16-bit number at `at`.

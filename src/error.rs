@@ -27,6 +27,19 @@ pub enum Error {
     /// The file system's own records don't add up (e.g. a file's sectors
     /// lead off the disk); the text says where.
     Damaged(String),
+    /// No file or directory of that name.
+    NotFound(String),
+    /// A file or directory of that name is already there.
+    AlreadyExists(String),
+    /// The name breaks the file system's rules; the text says how.
+    BadName(String),
+    /// The file is locked, so it can't be written, renamed or deleted
+    /// until it's unlocked.
+    Locked(String),
+    /// Not enough free sectors for the file.
+    DiskFull { needed: u32, free: u32 },
+    /// The directory has no room for another entry (DOS 2 holds 64).
+    DirectoryFull,
 }
 
 impl fmt::Display for Error {
@@ -48,6 +61,14 @@ impl fmt::Display for Error {
             Error::NotRepresentable(why) => write!(f, "can't be saved that way: {why}"),
             Error::UnknownFileSystem(why) => write!(f, "unknown file system ({why})"),
             Error::Damaged(why) => write!(f, "damaged: {why}"),
+            Error::NotFound(name) => write!(f, "{name} not found"),
+            Error::AlreadyExists(name) => write!(f, "{name} already exists"),
+            Error::BadName(why) => write!(f, "bad name: {why}"),
+            Error::Locked(name) => write!(f, "{name} is locked"),
+            Error::DiskFull { needed, free } => {
+                write!(f, "disk full: {needed} sectors needed, {free} free")
+            }
+            Error::DirectoryFull => write!(f, "the directory is full"),
         }
     }
 }
