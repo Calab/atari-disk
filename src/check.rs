@@ -40,20 +40,41 @@ pub enum SectorUse {
 pub enum Problem {
     /// `owner` uses the sector, but the bitmap says it's free, so DOS
     /// could give it to a new file and overwrite `owner`.
-    MarkedFree { sector: u32, owner: SectorUse },
+    MarkedFree {
+        /// The sector.
+        sector: u32,
+        /// What uses it.
+        owner: SectorUse,
+    },
     /// Two files or directories claim the same sector.
     Shared {
+        /// The sector.
         sector: u32,
+        /// The first to claim it.
         first: SectorUse,
+        /// The second.
         second: SectorUse,
     },
     /// Marked in use, but nothing uses it: space lost until the bitmap
     /// is rebuilt.
-    Unowned { sector: u32 },
+    Unowned {
+        /// The sector.
+        sector: u32,
+    },
     /// The free-sector count the DOS keeps doesn't match its bitmap.
-    FreeCount { recorded: u32, counted: u32 },
+    FreeCount {
+        /// What the VTOC or sector 1 says.
+        recorded: u32,
+        /// The free bits in the bitmap.
+        counted: u32,
+    },
     /// A file or directory (ATASCII path) can't be followed to its end.
-    Damaged { path: Vec<u8>, why: String },
+    Damaged {
+        /// Its path (ATASCII; empty for the main directory).
+        path: Vec<u8>,
+        /// What's wrong, in words.
+        why: String,
+    },
 }
 
 impl fmt::Display for SectorUse {

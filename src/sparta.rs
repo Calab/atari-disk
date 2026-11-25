@@ -1,53 +1,6 @@
 //! SpartaDOS file systems: SpartaDOS 2.x and 3.x (version `$20`) and
-//! SpartaDOS X (version `$21`), on 128- or 256-byte sectors.
-//!
-//! # Layout
-//! * Sectors 1–3: boot sectors. Sector 1 also holds the volume
-//!   information:
-//!
-//!   | Bytes | Meaning |
-//!   |---|---|
-//!   | `$09`–`$0A` | Sector map of the main (root) directory |
-//!   | `$0B`–`$0C` | Sectors on the disk |
-//!   | `$0D`–`$0E` | Free sectors |
-//!   | `$0F` | Sectors in the bitmap |
-//!   | `$10`–`$11` | First bitmap sector |
-//!   | `$12`–`$13` | Where to start looking for a free data sector |
-//!   | `$14`–`$15` | Where to start looking for a free directory sector |
-//!   | `$16`–`$1D` | Volume name, padded with spaces |
-//!   | `$1E` | Tracks (bit 7 set: double-sided) |
-//!   | `$07` | `$80`: marks a SpartaDOS disk (otherwise SpartaDOS gives error 148) |
-//!   | `$1F` | Sector size: `$80` 128 bytes, `$00` 256, `$01` 512 (SpartaDOS X) |
-//!   | `$20` | File system version: `$20` SpartaDOS 2/3, `$21` SpartaDOS X |
-//!   | `$26` | Volume sequence number (changes with each write) |
-//!   | `$27` | Volume random number (set by format) |
-//!
-//! * The bitmap: one bit per sector, from sector 0, bit 7 first; 1 =
-//!   free. Sector 0 doesn't exist and is marked in use.
-//! * Every file, directories included, has a chain of *sector maps*.
-//!   Each map sector starts with the next map (0 at the end) and the
-//!   previous one, then lists the file's data sectors, 2 bytes each: 62
-//!   per 128-byte map, 126 per 256-byte one. Data sectors hold nothing
-//!   but data, all of every sector up to the file's length. (254 per
-//!   map on 512-byte sectors.)
-//! * A directory is a file of 23-byte entries. The first is its header:
-//!   the parent directory's sector map (0 for the main directory) in
-//!   bytes 1–2, its own length in bytes 3–5 and its name in 6–13. Each
-//!   entry after that is:
-//!
-//!   | Bytes | Meaning |
-//!   |---|---|
-//!   | 0 | Flags: `$01` locked, `$02` hidden, `$04` archived, `$08` in use, `$10` deleted, `$20` directory |
-//!   | 1–2 | First sector map |
-//!   | 3–5 | Length in bytes |
-//!   | 6–13 | Name, padded with spaces |
-//!   | 14–16 | Extension, padded with spaces |
-//!   | 17–19 | Date: day, month, year (2 digits) |
-//!   | 20–22 | Time: hours, minutes, seconds |
-//!
-//!   Flags of 0 end the directory. In the parent, a directory's own
-//!   length isn't kept up to date (SpartaDOS X leaves it at 23), so the
-//!   header's length is the one to trust.
+//! SpartaDOS X (version `$21`). The layout is described in
+//! [`crate::formats`].
 
 use crate::error::{Error, Result};
 use crate::image::DiskImage;
@@ -107,10 +60,15 @@ pub struct Entry {
 pub struct Timestamp {
     /// The full year: SpartaDOS keeps 2 digits, read as 1980–2079.
     pub year: u16,
+    /// 1–12.
     pub month: u8,
+    /// 1–31.
     pub day: u8,
+    /// 0–23.
     pub hour: u8,
+    /// 0–59.
     pub minute: u8,
+    /// 0–59.
     pub second: u8,
 }
 
@@ -128,6 +86,7 @@ impl Entry {
         crate::names::joined(&self.name, &self.ext)
     }
 
+    /// A directory, not a file.
     pub fn is_dir(&self) -> bool {
         self.flags & DIRECTORY != 0
     }

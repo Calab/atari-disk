@@ -1,41 +1,6 @@
 //! Disk image containers: the sectors of a disk, as stored in an `.ATR`
-//! or `.XFD` file. Nothing here knows about DOS; see the file-system
-//! modules for that.
-//!
-//! Sectors are numbered from 1, as the Atari numbers them. On disks with
-//! 256-byte sectors the first three (the boot sectors) are still 128 bytes
-//! long, because the Atari OS always reads them that way. Disks with
-//! 512-byte sectors (hard disks under SpartaDOS X; the OS can't boot
-//! from them) keep all their sectors full length.
-//!
-//! # ATR
-//! A 16-byte header, then the sectors:
-//!
-//! | Bytes | Meaning |
-//! |---|---|
-//! | 0–1 | `$96 $02` (the sum of the letters "NICKATARI") |
-//! | 2–3 | Size of the sector data in 16-byte paragraphs, low word |
-//! | 4–5 | Sector size: 128, 256 or 512 |
-//! | 6 | Size in paragraphs, high byte |
-//! | 7–15 | Extras some programs use; kept as they are. Bit 0 of byte 15 is
-//!   the write-protect flag (APE and SIO2PC). |
-//!
-//! With 256-byte sectors the three boot sectors are normally stored as 128
-//! bytes each. Some images (made by older tools) give them three full
-//! 256-byte sectors' room instead, in one of two ways:
-//!
-//! * packed: the three 128-byte sectors, then 384 bytes of zeros;
-//! * in slots: each in the first half of its own 256 bytes.
-//!
-//! When the 384 bytes after the boot sectors are all zero the image is
-//! read as packed, otherwise as slots. Each image is written back the way
-//! it came.
-//!
-//! # XFD
-//! No header, only the sectors, so the layout comes from the file size.
-//! Any multiple of 128 bytes is read as 128-byte sectors; the two
-//! double-density sizes (183,936 bytes, or 184,320 with padded boot
-//! sectors) are read as 720 256-byte sectors.
+//! or `.XFD` file. Nothing here knows about DOS. The layouts are
+//! described in [`crate::formats`].
 
 use crate::error::{Error, Result};
 
@@ -221,6 +186,7 @@ impl DiskImage {
         out
     }
 
+    /// ATR or XFD: the format [`DiskImage::to_bytes`] writes.
     pub fn container(&self) -> Container {
         self.container
     }

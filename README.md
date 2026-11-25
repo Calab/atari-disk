@@ -1,53 +1,101 @@
 # atari-disk
 
-A Rust library for reading and writing Atari 8-bit disk images.
+A Rust library for Atari 8-bit disk images: `.ATR` and `.XFD` files, and
+the files on them under **Atari DOS 2** (2.0S, 2.0D, 2.5), **MyDOS 4.x**
+and **SpartaDOS** (2.x, 3.x and SpartaDOS X). No dependencies.
 
-**Status: early work.** Disk images (ATR and XFD), DOS 2, MyDOS and
-SpartaDOS read and write; the API may still change before a first release.
+Disks it writes have been checked in AltirraSDL under each DOS: DIR,
+copying, the DOS's own disk check, and booting.
+
+**Status:** complete for the formats above; not yet on crates.io, and the
+API may still change a little before a first release.
+
+## Using it
+
+Add it to your `Cargo.toml`:
+
+```toml
+[dependencies]
+atari-disk = { git = "https://github.com/Calab/atari-disk" }
+```
+
+Then:
+
+```rust
+use atari_disk::{DiskImage, Timestamp, Volume};
+
+let bytes = std::fs::read("GAMES.ATR")?;
+let mut vol = Volume::open(DiskImage::from_bytes(&bytes)?)?;
+
+for entry in vol.list("")? {             // "" is the main directory
+    println!("{:12} {:6} bytes", entry.name_text(), entry.size);
+}
+let listing = vol.read("GAMES>PACMAN.LST")?;      // `>` between directories
+vol.write("GAMES>COPY.LST", &listing, Some(Timestamp::new(2026, 11, 24, 15, 30, 0)?))?;
+
+std::fs::write("GAMES.ATR", vol.image().to_bytes())?;
+```
+
+The library works on the image in memory and does no file I/O of its
+own: your program reads the file, and saves `vol.image().to_bytes()`
+the way it prefers. Every change either succeeds completely or leaves
+the disk as it was.
+
+To see it on a real disk:
+
+```text
+cargo run --example ls -- GAMES.ATR
+```
+
+lists every directory and file, with sizes, dates and flags, and any
+problems found on the disk.
 
 ## What it does
 
-- **Disk images**: `.ATR` and `.XFD` files with 128-, 256- or 512-byte
-  sectors (512 in ATR only):
-  single (720 × 128), enhanced (1040 × 128), double (720 × 256) and larger
-  ATR images such as hard-disk partitions. Every image is written back
-  exactly as it was read, including the three ways double-density images
-  store their boot sectors and the extra ATR header bytes (such as the
-  write-protect flag).
-- **File systems**:
-  - Atari DOS 2.0S, 2.0D and 2.5
-  - MyDOS 4.x (subdirectories, disks up to 65535 sectors)
-  - SpartaDOS 2.x/3.x and SpartaDOS X (which share one file-system format)
+`Volume` is the main type. For every file system it can:
 
-  For each: list directories, read (all or part of a file), write,
-  rename, move, delete, lock and unlock files, make directories, set
-  dates, hidden/archive flags and volume names (SpartaDOS), check names,
-  map what every sector holds, validate a disk, read and write raw
-  sectors, format blank data disks, and make a disk bootable from a DOS
-  disk you supply. File names and paths are ATASCII bytes, with
-  conversions to and from ASCII.
+- list directories, read files (all or a byte range), write, rename,
+  move, delete and lock/unlock files, and make directories (MyDOS,
+  SpartaDOS);
+- set dates, hidden and archive flags, and volume names (SpartaDOS);
+- check a name before using it, and say whether a file would fit;
+- format blank data disks: DOS 2 single, double and enhanced density;
+  MyDOS and SpartaDOS single, enhanced, double, double-sided, or any
+  size up to 65535 sectors (512-byte sectors for SpartaDOS X);
+- make a disk bootable from a DOS disk you supply (no DOS ships with
+  the crate), and say whether a disk is set up to boot;
+- validate a disk (bitmap errors, sectors claimed twice, lost sectors,
+  damaged files) and say what every sector holds;
+- say what a disk's DOS supports (`features()`), so a program can offer
+  only what works.
 
-Not covered: copying files (read then write), undeleting, and image
+`DiskImage` gives sector-by-sector access for anything else, including
+disks with no file system the crate knows.
+
+File names and paths are ATASCII bytes, exactly as the Atari stores
+them, so every file can be reached; `atari_disk::atascii` converts to
+and from ASCII.
+
+Not covered: copying files (read, then write), undeleting, and image
 formats other than ATR and XFD (DCM, ATX, PRO).
 
-The library works on images in memory and does no file I/O of its own: read
-the file, make changes, then save `DiskImage::to_bytes()` the way your
-program prefers.
+## Documentation
 
-```rust
-use atari_disk::DiskImage;
+Every public type and call is documented, most with examples:
 
-let disk = DiskImage::from_bytes(&std::fs::read("GAMES.ATR")?)?;
-println!("{} sectors of {} bytes", disk.sector_count(), disk.sector_size());
-let boot = disk.sector(1)?;
+```text
+cargo doc --open
 ```
+
+The `formats` page in those docs describes the ATR and XFD files and
+each file system byte by byte, including details found on real disks.
 
 ## Testing
 
-`cargo test` runs the built-in tests. The tests in `tests/samples.rs` also
-read real disk images from `samples/DOS 2/`, `samples/SpartaDOS/` and
-`samples/MyDOS/`. Those images are copyrighted, so they aren't in the
-repository, and any missing folder is skipped.
+`cargo test` runs the built-in tests. The tests in `tests/samples.rs`
+also read real disk images from `samples/DOS 2/`, `samples/MyDOS/` and
+`samples/SpartaDOS/`. Those images are copyrighted, so they aren't in
+the repository, and missing folders are skipped.
 
 ## Licence
 

@@ -1,58 +1,6 @@
 //! Atari DOS 2 file systems: DOS 2.0S, 2.0D and 2.5 (single, double and
-//! enhanced density), and MyDOS 4.x, which builds on them.
-//!
-//! # Layout
-//! * Sectors 1–3: boot sectors; DOS.SYS follows from sector 4.
-//! * Sector 360: the VTOC (volume table of contents):
-//!
-//!   | Bytes | Meaning |
-//!   |---|---|
-//!   | 0 | DOS code: 2 (MyDOS: more for a VTOC of several sectors, below) |
-//!   | 1–2 | Sectors DOS can use (707 single density, 1010 enhanced) |
-//!   | 3–4 | Free sectors (on enhanced disks, of sectors 1–719 only) |
-//!   | 10– | Bitmap: bit 7 of byte 10 is sector 0; 1 = free |
-//!
-//! * Sectors 361–368: the directory, 8 entries of 16 bytes per sector
-//!   (64 files):
-//!
-//!   | Bytes | Meaning |
-//!   |---|---|
-//!   | 0 | Flags: `$80` deleted, `$40` in use, `$20` locked, `$10` a MyDOS directory, `$04` MyDOS 16-bit links, `$02` made by DOS 2, `$01` open for writing (or see below) |
-//!   | 1–2 | Length in sectors |
-//!   | 3–4 | First sector |
-//!   | 5–12 | Name, padded with spaces |
-//!   | 13–15 | Extension, padded with spaces |
-//!
-//!   An entry whose flags are 0 has never been used, and ends the
-//!   directory.
-//! * A file is a chain of sectors. The last 3 bytes of each hold the file
-//!   number (its directory entry, 0–63) in the top 6 bits, then the next
-//!   sector in 10 bits (0 at the end of the file), then how many bytes of
-//!   the sector are data. So a 128-byte sector holds 125 bytes of the
-//!   file and a 256-byte sector 253.
-//! * DOS 2.5 enhanced density (1040 sectors of 128 bytes) adds a second
-//!   VTOC in sector 1024 for sectors 720–1023: its bytes 0–83 repeat the
-//!   VTOC bitmap for sectors 48–719, bytes 84–121 cover sectors 720–1023,
-//!   and bytes 122–123 count the free ones. DOS 2.0 sees only the first
-//!   VTOC, so on such a disk it shows fewer free sectors than DOS 2.5.
-//!
-//!   A file that uses sectors above 719 has flags `$03` (`$23` locked):
-//!   "in use" is clear so DOS 2.0 ignores it, and DOS 2.5 lists it in
-//!   angle brackets, `<BIG     DAT>`. (From DOS 2.5's DOS.SYS: an entry is
-//!   a file if its flags AND `$43` are `$03`, or bit 0 is clear; DIR
-//!   prints the brackets when bit 0 is set.)
-//!
-//! # MyDOS
-//! * Every sector is usable, 720 included: a 720-sector disk has 708.
-//! * When the bitmap doesn't fit in sector 360 it runs on into 359, 358
-//!   and so on, and VTOC byte 0 is 2 plus the bitmap's length in 256-byte
-//!   units (3 for 1040 × 128; 35 for 65535 sectors, which takes 66
-//!   128-byte or 33 256-byte sectors).
-//! * Files flagged `$04` (`$46`, used on disks over 1023 sectors) have
-//!   16-bit links: next sector high byte, low byte, byte count; no file
-//!   number.
-//! * A directory entry flagged `$10` is a subdirectory: 8 sectors from
-//!   its first sector, laid out like the main directory.
+//! enhanced density), and MyDOS 4.x, which builds on them. The layout is
+//! described in [`crate::formats`].
 
 use crate::error::{Error, Result};
 use crate::image::DiskImage;

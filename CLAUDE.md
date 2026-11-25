@@ -17,6 +17,10 @@ Apache-2.0. Repo: github.com/Calab/atari-disk.
 - CI must pass `cargo fmt --check`, `cargo clippy --all-targets -- -D
   warnings` and `cargo test`.
 - No dependencies unless there's a strong reason.
+- Docs are for people outside the project too: `#![warn(missing_docs)]`
+  is on (CI fails on an undocumented public item), key calls have
+  runnable examples, and anything learned about a disk format goes in
+  `src/formats.rs` (the `formats` page of the docs).
 
 ## Samples
 Real images come from Steve's NAS:

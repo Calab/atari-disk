@@ -14,11 +14,19 @@ pub enum Error {
     /// sectors.
     Unsupported(String),
     /// Sector numbers run from 1 to the image's sector count.
-    SectorOutOfRange { sector: u32, count: u32 },
+    SectorOutOfRange {
+        /// The sector asked for.
+        sector: u32,
+        /// The disk's sector count.
+        count: u32,
+    },
     /// Data written to a sector must be exactly the sector's length.
     WrongSectorLength {
+        /// The sector.
         sector: u32,
+        /// Its length.
         expected: usize,
+        /// The length given.
         got: usize,
     },
     /// XFD images have no header, so they can only hold layouts that
@@ -43,7 +51,12 @@ pub enum Error {
     /// until it's unlocked.
     Locked(String),
     /// Not enough free sectors for the file.
-    DiskFull { needed: u32, free: u32 },
+    DiskFull {
+        /// Sectors the change needs.
+        needed: u32,
+        /// Sectors free.
+        free: u32,
+    },
     /// The directory has no room for another entry (DOS 2 holds 64).
     DirectoryFull,
     /// Only empty directories can be deleted.

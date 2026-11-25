@@ -124,7 +124,12 @@ pub enum Layout {
     /// 512 bytes, e.g. 1440 × 256 for a double-sided disk or 65535 × 256
     /// for a hard disk partition. 512-byte sectors are for SpartaDOS X
     /// only.
-    SpartaCustom { sectors: u32, sector_size: usize },
+    SpartaCustom {
+        /// How many sectors.
+        sectors: u32,
+        /// Bytes per sector.
+        sector_size: usize,
+    },
     /// MyDOS single density: 720 sectors of 128 bytes, 708 free.
     MyDosSingle,
     /// MyDOS on 1040 sectors of 128 bytes, 1027 free.
@@ -133,7 +138,12 @@ pub enum Layout {
     MyDosDouble,
     /// MyDOS with any number of sectors (369 to 65535) of 128 or 256
     /// bytes, e.g. 65535 × 256 for a hard disk partition.
-    MyDosCustom { sectors: u32, sector_size: usize },
+    MyDosCustom {
+        /// How many sectors.
+        sectors: u32,
+        /// Bytes per sector.
+        sector_size: usize,
+    },
     /// SpartaDOS double-sided double density, as on an XF551: 1440
     /// sectors of 256 bytes (360 KB), 40 tracks a side.
     SpartaDoubleSided,
@@ -148,7 +158,12 @@ pub enum Layout {
     MyDosDoubleSided80,
     /// No file system: `sectors` sectors of `sector_size` bytes (128, 256
     /// or 512), all zeros, for programs that write their own sectors.
-    Raw { sectors: u32, sector_size: usize },
+    Raw {
+        /// How many sectors.
+        sectors: u32,
+        /// Bytes per sector.
+        sector_size: usize,
+    },
 }
 
 impl Layout {
@@ -204,6 +219,7 @@ impl Layout {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum EntryKind {
+    /// A file.
     File,
     /// Only on file systems with directories (SpartaDOS, MyDOS).
     Directory,
@@ -217,11 +233,14 @@ pub struct DirEntry {
     /// extension): give it back in a path to reach the entry. See
     /// [`DirEntry::name_text`] to show it.
     pub name: Vec<u8>,
+    /// File or directory.
     pub kind: EntryKind,
     /// The length in bytes.
     pub size: u32,
     /// The sectors it takes up (on SpartaDOS, its sector maps included).
     pub sectors: u32,
+    /// Locked: it can't be written, renamed, moved or deleted until
+    /// it's unlocked.
     pub locked: bool,
     /// Left out of DIR listings (SpartaDOS only).
     pub hidden: bool,
@@ -242,6 +261,7 @@ impl DirEntry {
         atascii_to_ascii(&self.name)
     }
 
+    /// A directory, not a file.
     pub fn is_dir(&self) -> bool {
         self.kind == EntryKind::Directory
     }
@@ -359,6 +379,17 @@ impl Volume {
     /// the file calls give [`Error::Unsupported`]. (Ask
     /// [`Volume::detect`] first to tell a disk with no file system from
     /// one with.)
+    ///
+    /// ```no_run
+    /// use atari_disk::{DiskImage, FileSystem, Volume};
+    ///
+    /// let bytes = std::fs::read("GAMES.ATR")?;
+    /// let vol = Volume::open(DiskImage::from_bytes(&bytes)?)?;
+    /// if vol.file_system() == FileSystem::Raw {
+    ///     println!("no DOS this crate knows; sectors only");
+    /// }
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     pub fn open(image: DiskImage) -> Result<Self> {
         let fs = Self::detect(&image).unwrap_or(FileSystem::Raw);
         Ok(Self::with(image, fs))
@@ -380,6 +411,17 @@ impl Volume {
     }
 
     /// What this disk's file system can do (see [`Features`]).
+    ///
+    /// ```
+    /// use atari_disk::{Container, Layout, Volume};
+    ///
+    /// let vol = Volume::format(Layout::Dos2Single, Container::Atr)?;
+    /// let can = vol.features();
+    /// assert!(can.files && !can.directories && !can.dates);
+    /// // Before a disk exists, for a "New disk" dialog:
+    /// assert!(Layout::SpartaDouble.file_system().features().directories);
+    /// # Ok::<(), atari_disk::Error>(())
+    /// ```
     pub fn features(&self) -> Features {
         let mut f = self.fs.features();
         if self.image.sector_size() > 256 {
@@ -390,6 +432,15 @@ impl Volume {
 
     /// A blank, formatted data disk. A SpartaDOS one has no volume name
     /// until [`Volume::set_volume_name`] gives it one.
+    ///
+    /// ```
+    /// use atari_disk::{Container, Layout, Volume};
+    ///
+    /// let mut vol = Volume::format(Layout::SpartaDoubleSided, Container::Atr)?;
+    /// vol.set_volume_name("BACKUP")?;
+    /// assert_eq!(vol.image().sector_count(), 1440);
+    /// # Ok::<(), atari_disk::Error>(())
+    /// ```
     pub fn format(layout: Layout, container: Container) -> Result<Self> {
         let image = match layout {
             Layout::Dos2Single => dos2::format(container, dos2::Kind::Single)?,
@@ -427,6 +478,7 @@ impl Volume {
         Self::open(image)
     }
 
+    /// The file system on the disk ([`FileSystem::Raw`] if none).
     pub fn file_system(&self) -> FileSystem {
         self.fs
     }
@@ -473,6 +525,7 @@ impl Volume {
         self.uppercase = on;
     }
 
+    /// Is [`Volume::set_auto_uppercase`] on?
     pub fn auto_uppercase(&self) -> bool {
         self.uppercase
     }
@@ -484,6 +537,7 @@ impl Volume {
         self.overwrite = on;
     }
 
+    /// Is [`Volume::set_overwrite`] on?
     pub fn overwrite(&self) -> bool {
         self.overwrite
     }
@@ -491,6 +545,20 @@ impl Volume {
     /// Is `name` allowed as a new file or directory name on this disk?
     /// `Ok`, or [`Error::BadName`] saying why not. (A name only, no `>`.
     /// Lower case passes only with [`Volume::set_auto_uppercase`] on.)
+    ///
+    /// ```
+    /// use atari_disk::{Container, Layout, Volume};
+    ///
+    /// let dos = Volume::format(Layout::Dos2Single, Container::Atr)?;
+    /// assert!(dos.check_name("GAME.BAS").is_ok());
+    /// assert!(dos.check_name("MY_GAME").is_err()); // no _ on DOS 2
+    /// let sparta = Volume::format(Layout::SpartaSingle, Container::Atr)?;
+    /// assert!(sparta.check_name("MY_GAME").is_ok());
+    /// if let Err(why) = dos.check_name("TOOLONGNAME") {
+    ///     println!("{why}"); // bad name: TOOLONGNAME: the name must be 1 to 8 characters
+    /// }
+    /// # Ok::<(), atari_disk::Error>(())
+    /// ```
     pub fn check_name(&self, name: impl AsRef<[u8]>) -> Result<()> {
         self.parse_name(name.as_ref()).map(|_| ())
     }
@@ -537,6 +605,20 @@ impl Volume {
     /// top one, or e.g. `"GAMES>OLD"` on SpartaDOS (a trailing `>` is
     /// fine). Fails with [`Error::NotFound`] if there's no such
     /// directory, or [`Error::NotADirectory`] if it's a file.
+    ///
+    /// ```
+    /// use atari_disk::{Container, Layout, Volume};
+    ///
+    /// let mut vol = Volume::format(Layout::MyDosSingle, Container::Atr)?;
+    /// vol.make_dir("GAMES", None)?;
+    /// vol.write("GAMES>PAC.COM", &[0; 300], None)?;
+    /// for entry in vol.list("GAMES")? {
+    ///     let kind = if entry.is_dir() { "<DIR>" } else { "" };
+    ///     println!("{:12} {:6} {kind}", entry.name_text(), entry.size);
+    /// }
+    /// assert_eq!(vol.list("GAMES")?[0].name, b"PAC.COM");
+    /// # Ok::<(), atari_disk::Error>(())
+    /// ```
     pub fn list(&self, dir: impl AsRef<[u8]>) -> Result<Vec<DirEntry>> {
         let dir = dir.as_ref();
         if self.fs.is_sparta() {
@@ -576,6 +658,15 @@ impl Volume {
 
     /// Bytes `range` of a file (e.g. `100..200`); a range running past
     /// the end gives what there is, and one starting past it gives none.
+    ///
+    /// ```
+    /// use atari_disk::{Container, Layout, Volume};
+    ///
+    /// let mut vol = Volume::format(Layout::Dos2Single, Container::Atr)?;
+    /// vol.write("DATA", b"0123456789", None)?;
+    /// assert_eq!(vol.read_range("DATA", 2..5)?, b"234");
+    /// # Ok::<(), atari_disk::Error>(())
+    /// ```
     pub fn read_range(&self, path: impl AsRef<[u8]>, range: Range<usize>) -> Result<Vec<u8>> {
         let data = self.read(path)?;
         let end = range.end.min(data.len());
@@ -590,6 +681,19 @@ impl Volume {
     /// `when` is the date and time to give it, on file systems that keep
     /// one (SpartaDOS). `None` leaves a new file without a date, and keeps
     /// the date of a file it replaces. DOS 2 ignores it.
+    ///
+    /// ```
+    /// use atari_disk::{Container, Error, Layout, Volume};
+    ///
+    /// let mut vol = Volume::format(Layout::Dos2Single, Container::Atr)?;
+    /// vol.write("NOTES.TXT", b"first", None)?;
+    /// // A second write of the same name is refused, until allowed:
+    /// assert!(matches!(vol.write("NOTES.TXT", b"second", None), Err(Error::AlreadyExists(_))));
+    /// vol.set_overwrite(true);
+    /// vol.write("NOTES.TXT", b"second", None)?;
+    /// assert_eq!(vol.read("NOTES.TXT")?, b"second");
+    /// # Ok::<(), atari_disk::Error>(())
+    /// ```
     pub fn write(
         &mut self,
         path: impl AsRef<[u8]>,
@@ -632,6 +736,15 @@ impl Volume {
     /// Would [`Volume::write`] of `len` bytes to `path` fit? `Ok(false)`
     /// when the disk or directory is too full; other problems (a bad
     /// name, a locked file, ...) are errors, as `write` would give them.
+    ///
+    /// ```
+    /// use atari_disk::{Container, Layout, Volume};
+    ///
+    /// let vol = Volume::format(Layout::Dos2Single, Container::Atr)?;
+    /// assert!(vol.fits("SMALL", 1000)?);
+    /// assert!(!vol.fits("HUGE", 200_000)?); // a single-density disk holds about 88 KB
+    /// # Ok::<(), atari_disk::Error>(())
+    /// ```
     pub fn fits(&self, path: impl AsRef<[u8]>, len: usize) -> Result<bool> {
         let mut trial = self.clone();
         match trial.write(path, &vec![0; len], None) {
@@ -673,6 +786,17 @@ impl Volume {
     /// directories ([`Error::Unsupported`] otherwise, or for moving a
     /// directory into itself). Fails with [`Error::Locked`] if it's
     /// locked, or [`Error::AlreadyExists`] if `dir` has that name already.
+    ///
+    /// ```
+    /// use atari_disk::{Container, Layout, Volume};
+    ///
+    /// let mut vol = Volume::format(Layout::SpartaSingle, Container::Atr)?;
+    /// vol.make_dir("OLD", None)?;
+    /// vol.write("LETTER.TXT", b"Dear Atari", None)?;
+    /// vol.move_to("LETTER.TXT", "OLD")?;
+    /// assert_eq!(vol.read("OLD>LETTER.TXT")?, b"Dear Atari");
+    /// # Ok::<(), atari_disk::Error>(())
+    /// ```
     pub fn move_to(&mut self, path: impl AsRef<[u8]>, dir: impl AsRef<[u8]>) -> Result<()> {
         let (path, dir) = (path.as_ref(), dir.as_ref());
         self.need_dirs()?;
@@ -835,6 +959,17 @@ impl Volume {
     /// [`Volume::set_overwrite`] is on. Fails with [`Error::NotBootable`]
     /// if `source` has no boot file, is for a different DOS, or this disk
     /// has 512-byte sectors (the Atari can't boot from those).
+    ///
+    /// ```no_run
+    /// use atari_disk::{Container, DiskImage, Layout, Volume};
+    ///
+    /// // A DOS 2.5 system disk the user has (this crate ships no DOS).
+    /// let dos = DiskImage::from_bytes(&std::fs::read("DOS25.ATR")?)?;
+    /// let mut vol = Volume::format(Layout::Dos25Enhanced, Container::Atr)?;
+    /// vol.make_bootable(&dos)?;
+    /// assert!(vol.is_bootable() && vol.exists("DOS.SYS"));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     pub fn make_bootable(&mut self, source: &DiskImage) -> Result<()> {
         let not = |why: &str| Err(Error::NotBootable(why.into()));
         if self.image.sector_size() > 256 {
@@ -938,6 +1073,18 @@ impl Volume {
     /// What each sector holds: index `n` is sector `n` (index 0, which
     /// doesn't exist, is [`SectorUse::Reserved`]). Where two things claim
     /// a sector it shows the first; [`Volume::validate`] reports both.
+    ///
+    /// ```
+    /// use atari_disk::{Container, Layout, SectorUse, Volume};
+    ///
+    /// let mut vol = Volume::format(Layout::Dos2Single, Container::Atr)?;
+    /// vol.write("HI", b"hello", None)?;
+    /// let map = vol.sector_map()?;
+    /// assert_eq!(map[1], SectorUse::Boot);
+    /// assert_eq!(map[360], SectorUse::System); // the VTOC
+    /// assert_eq!(map[4], SectorUse::File(b"HI".to_vec()));
+    /// # Ok::<(), atari_disk::Error>(())
+    /// ```
     pub fn sector_map(&self) -> Result<Vec<SectorUse>> {
         Ok(self.check()?.0)
     }
@@ -947,6 +1094,17 @@ impl Volume {
     /// exactly the sectors in use, and the free count matches it. An
     /// empty list means the disk is sound. Fails only if the file system
     /// can't be read at all.
+    ///
+    /// ```
+    /// use atari_disk::{Container, Layout, Volume};
+    ///
+    /// let vol = Volume::format(Layout::Dos2Single, Container::Atr)?;
+    /// for problem in vol.validate()? {
+    ///     println!("{problem}"); // e.g. "sector 7 is marked free but belongs to file DOS.SYS"
+    /// }
+    /// assert!(vol.validate()?.is_empty());
+    /// # Ok::<(), atari_disk::Error>(())
+    /// ```
     pub fn validate(&self) -> Result<Vec<Problem>> {
         Ok(self.check()?.1)
     }
