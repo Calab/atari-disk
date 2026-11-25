@@ -1,6 +1,6 @@
 [package]
 name = "atari-disk"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2024"
 authors = ["Steve Norton", "Claude AI"]
 description = "Read and write Atari 8-bit disk images (ATR, XFD) and their DOS 2 and SpartaDOS file systems"
