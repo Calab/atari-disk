@@ -35,10 +35,17 @@ AltirraSDL (DIR, free sectors, the DOS's own disk check).
 - Works on an image in memory; no file I/O in the library.
 - Layers: `image.rs` (ATR/XFD sectors, done) → file systems (DOS 2, then
   SpartaDOS) → a common API the editor uses: list a directory, read,
-  write, rename, delete, make directory (SpartaDOS only), format a blank
-  disk. No copy or move.
+  write, rename, delete, make directory and move between directories
+  (SpartaDOS and MyDOS only), format a blank disk. No copy. Rename and
+  move are separate calls: `rename` keeps the directory, `move_to`
+  keeps the name.
 - Formatted blank disks are data disks, NOT bootable: DOS.SYS/DUP.SYS or
   a SpartaDOS boot loader can't be shipped (copyright).
+- A `FileSystem` names a disk format, not a DOS. A DOS whose format
+  differs in any way gets its own, even if only recognised (DOS 3, DOS
+  XE, LiteDOS, TOP-DOS). One writing exactly DOS 2's format (SmartDOS,
+  DOS XL), or a DOS 2 compatible one we can't be sure of, is DOS 2;
+  K-DOS is MyDOS. The `FileSystem` docs list which DOSes each covers.
 - XFD only for layouts its file size identifies (128-byte sectors, or 720
   × 256).
 - Respect locked files and the ATR write-protect flag (report them; the

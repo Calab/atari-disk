@@ -46,6 +46,9 @@ pub struct DiskImage {
     boot: Boot,
     /// ATR header bytes 7 to 15, kept as read.
     atr_extra: [u8; 9],
+    /// Bytes an ATR file had after the sectors its header declares, kept
+    /// so it's written back as it was (dropped when stored as XFD).
+    trailing: Vec<u8>,
     /// Every sector, each in a slot `sector_size` long (the boot sectors
     /// use only their first 128 bytes).
     data: Vec<u8>,
@@ -65,6 +68,7 @@ impl DiskImage {
             count,
             boot: Boot::Short,
             atr_extra: [0; 9],
+            trailing: Vec::new(),
             data: vec![0; sector_size * count as usize],
         };
         if container == Container::Xfd {
@@ -91,21 +95,28 @@ impl DiskImage {
         let paragraphs = word(2) | (bytes[6] as usize) << 16;
         let sector_size = word(4);
         check_sector_size(sector_size)?;
-        // Some tools write a wrong size; trust the file when it's shorter
-        // and ignore anything after the declared size.
+        // Some tools write a wrong size; trust the file when it's shorter.
+        // Anything after the declared size isn't part of the disk, but is
+        // kept to write back.
         let body = &bytes[ATR_HEADER..];
         let len = (paragraphs * 16).min(body.len());
         let (count, boot) = layout(&body[..len], sector_size)?;
         let mut atr_extra = [0; 9];
         atr_extra.copy_from_slice(&bytes[7..ATR_HEADER]);
-        Ok(Self::load(
+        let mut image = Self::load(
             Container::Atr,
             sector_size,
             count,
             boot,
             atr_extra,
             &body[..len],
-        ))
+        );
+        // Only when the declared size covers every sector: otherwise the
+        // sectors don't end where the declared size does.
+        if image.stored_at(count) + image.stored_len(count) == len {
+            image.trailing = body[len..].to_vec();
+        }
+        Ok(image)
     }
 
     /// Read an `.XFD` file.
@@ -151,6 +162,7 @@ impl DiskImage {
             count,
             boot,
             atr_extra,
+            trailing: Vec::new(),
             data: vec![0; sector_size * count as usize],
         };
         for n in 1..=count {
@@ -183,6 +195,9 @@ impl DiskImage {
             let (at, len, slot) = (start + self.stored_at(n), self.stored_len(n), self.slot(n));
             out[at..at + len].copy_from_slice(&self.data[slot..slot + len]);
         }
+        if self.container == Container::Atr {
+            out.extend_from_slice(&self.trailing);
+        }
         out
     }
 
@@ -201,6 +216,9 @@ impl DiskImage {
         {
             self.container = old;
             return Err(e);
+        }
+        if container == Container::Xfd {
+            self.trailing.clear();
         }
         Ok(())
     }
@@ -398,6 +416,23 @@ fn layout(body: &[u8], sector_size: usize) -> Result<(u32, Boot)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bytes_after_an_atr_disk_are_kept() {
+        let mut bytes = DiskImage::new(Container::Atr, 128, 720).unwrap().to_bytes();
+        bytes.extend_from_slice(&[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+        let mut image = DiskImage::from_bytes(&bytes).unwrap();
+        assert_eq!(image.sector_count(), 720);
+        assert_eq!(image.to_bytes(), bytes);
+        image.sector_mut(5).unwrap()[0] = 0xAA;
+        let out = image.to_bytes();
+        assert_eq!(out.len(), bytes.len());
+        assert_eq!(out[16 + 4 * 128], 0xAA);
+        assert_eq!(out[out.len() - 16..], bytes[bytes.len() - 16..]);
+        // XFD has no room for them.
+        image.set_container(Container::Xfd).unwrap();
+        assert_eq!(image.to_bytes().len(), 720 * 128);
+    }
 
     /// A distinct pattern for each sector, to spot misplaced data.
     fn fill(image: &mut DiskImage) {

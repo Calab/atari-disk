@@ -70,7 +70,14 @@ problems found on the disk.
   only what works.
 
 `DiskImage` gives sector-by-sector access for anything else, including
-disks with no file system the crate knows.
+disks with no file system the crate knows. **Atari DOS 3**, **DOS XE**,
+**LiteDOS** and **TOP-DOS** disks are recognised but not supported: they
+open with their own `FileSystem` (and `name()` to show), and give sector
+access only.
+
+Each `FileSystem` is named for its disk format, so DOSes that write the
+same disks share one: **SmartDOS** and **DOS XL** disks are DOS 2, and
+**K-DOS** disks are MyDOS.
 
 File names and paths are ATASCII bytes, exactly as the Atari stores
 them, so every file can be reached; `atari_disk::atascii` converts to
@@ -93,9 +100,11 @@ each file system byte by byte, including details found on real disks.
 ## Testing
 
 `cargo test` runs the built-in tests. The tests in `tests/samples.rs`
-also read real disk images from `samples/DOS 2/`, `samples/MyDOS/` and
-`samples/SpartaDOS/`. Those images are copyrighted, so they aren't in
-the repository, and missing folders are skipped.
+also read real disk images from `samples/DOS 2/`, `samples/MyDOS/`,
+`samples/SpartaDOS/`, `samples/DOS 3/`, `samples/DOS XE/`,
+`samples/LiteDOS/` and `samples/TOP-DOS/`. Those images are
+copyrighted, so they aren't in the repository, and missing folders are
+skipped.
 
 ## Licence
 

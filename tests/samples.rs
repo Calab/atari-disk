@@ -51,6 +51,51 @@ fn every_sample_round_trips() {
     }
 }
 
+/// Disks for DOSes this crate recognises but can't read open with their
+/// own file system: sectors only, and file calls name the DOS. The
+/// supported samples are never taken for one of them.
+#[test]
+fn unsupported_samples_are_recognised() {
+    for (folder, fs) in [
+        ("DOS 3", FileSystem::Dos3),
+        ("DOS XE", FileSystem::DosXe),
+        ("LiteDOS", FileSystem::LiteDos),
+        ("TOP-DOS", FileSystem::TopDos),
+    ] {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("samples")
+            .join(folder);
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            eprintln!("skipping {} (not found)", dir.display());
+            continue;
+        };
+        for path in entries.flatten().map(|e| e.path()) {
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            let bytes = std::fs::read(&path).unwrap();
+            let image = DiskImage::from_bytes(&bytes).unwrap();
+            assert!(image.to_bytes() == bytes, "{name} changed");
+            let vol = Volume::open(image).unwrap();
+            assert_eq!(vol.file_system(), fs, "{name}");
+            assert!(!vol.features().files, "{name}");
+            let err = vol.list("").unwrap_err();
+            assert!(err.to_string().contains(fs.name()), "{name}: {err}");
+            println!("{name}: {} ({err})", fs.name());
+        }
+    }
+    for path in images() {
+        let image = DiskImage::from_bytes(&std::fs::read(&path).unwrap()).unwrap();
+        if image.sector(1).unwrap().iter().all(|&b| b == 0) {
+            continue; // never formatted
+        }
+        let fs = Volume::detect(&image);
+        assert!(
+            fs.is_some_and(|fs| fs.features().files),
+            "{}: {fs:?}",
+            path.display()
+        );
+    }
+}
+
 /// Every file on the DOS 2 (and DOS 2-style MyDOS) samples reads back
 /// whole, and the free-sector counts agree with the bitmap.
 #[test]

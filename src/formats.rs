@@ -6,6 +6,8 @@
 //! Much of it was checked against real disks: DOS 2.0S, DOS 2.5, MyDOS
 //! 4.5, SpartaDOS 3.2g and SpartaDOS X 4.49 images, blanks those DOSes
 //! formatted themselves, and disks this crate wrote, tried in AltirraSDL.
+//! The DOS 3, DOS XE, LiteDOS, K-DOS and TOP-DOS notes come from their
+//! master disks.
 //!
 //! # Sectors
 //! Sectors are numbered from 1, as the Atari numbers them. A disk has
@@ -49,6 +51,12 @@
 //! read as packed, otherwise as slots. Each image is written back the
 //! way it came, so every image round-trips byte for byte.
 //!
+//! Some files are longer than their header says (the LiteDOS 3.07 master
+//! disk has 16 zero bytes after its 720 sectors). The header's size is
+//! the disk; the rest isn't part of it, but is kept and written back
+//! after the sectors (not when the image is saved as XFD). When the file
+//! is *shorter* than the header says, the file is trusted.
+//!
 //! # XFD files
 //! No header, only the sectors, so the layout comes from the file size.
 //! Any multiple of 128 bytes is read as 128-byte sectors; the two
@@ -57,6 +65,13 @@
 //! saved as ATR.
 //!
 //! # Atari DOS 2 (2.0S, 2.0D, 2.5)
+//! SmartDOS 6.1d and DOS XL 2.20 and 2.35 write exactly this format, so
+//! their disks are [`crate::FileSystem::Dos2`]. Checked on their master
+//! disks: the same VTOC, directory flags and sector links, and
+//! [`crate::Volume::validate`] finds nothing. (Their boot sectors' own
+//! settings, such as DOS XL's file buffers in byte 9, are copied
+//! unchanged by [`crate::Volume::make_bootable`].)
+//!
 //! * Sectors 1–3: boot sectors. DOS 2 keeps facts about DOS.SYS in them:
 //!
 //!   | Byte | Meaning |
@@ -109,6 +124,11 @@
 //!   sectors (error 143).
 //!
 //! # MyDOS 4.x
+//! K-DOS (K-Byte) writes the same disks as MyDOS single density, so they
+//! are [`crate::FileSystem::MyDos`] too: DOS 2's layout using sector 720,
+//! a VTOC of code 2 and 708 sectors. Its boot sectors are its own (0 in
+//! the first byte, where MyDOS's own disks have `M`).
+//!
 //! MyDOS keeps DOS 2's layout and adds:
 //! * Every sector is usable, 720 included: a 720-sector disk has 708.
 //! * When the bitmap doesn't fit in sector 360 it runs on into 359, 358
@@ -179,6 +199,38 @@
 //!   gain `$10`. In the parent, a directory's own length isn't kept up to
 //!   date (SpartaDOS X leaves it at 23), so the header's length is the
 //!   one to trust.
+//!
+//! # Recognised, not supported
+//! These disks open as their own [`crate::FileSystem`], with sector
+//! access only. DOS 3, LiteDOS and DOS XE are looked for only after DOS 2,
+//! MyDOS and SpartaDOS have been ruled out, so their looser signs never
+//! take a disk from a file system that can be read. TOP-DOS disks pass
+//! for MyDOS, so they're checked first, by signs no MyDOS disk has.
+//! ([`crate::Dos2::open`] still reads them as MyDOS; only
+//! [`crate::Volume`] tells them apart.)
+//!
+//! * **TOP-DOS** (Eclipse Software): DOS 2's layout (707 sectors, sector
+//!   720 unused), but VTOC code `$03`, and `$80` in the boot sector's
+//!   first byte. MyDOS uses code 3 (two VTOC sectors, 359 and 360) only
+//!   when one can't map the disk, as on 1040 sectors; on a disk one
+//!   sector maps, code 3 isn't MyDOS. Read as MyDOS, sector 359 would be
+//!   taken for part of the bitmap.
+//!
+//! * **Atari DOS 3** (1050 drive): 128-byte sectors, 720 or 1040 of
+//!   them (Altirra checks the same). Files are kept in 1K blocks of 8
+//!   sectors. The directory is sectors 16–23, in 16-byte entries (flags,
+//!   name 8 + 3, then block count, first block and length). Sector 16
+//!   starts with a 16-byte header whose bytes 14–15 are `$57 $A5` on 720
+//!   sectors and `$7F $A5` on 1040 sectors. Sector 24 is the block table:
+//!   one byte per block giving the next block, with `$FD` marking a
+//!   file's last block.
+//! * **LiteDOS** (Mr. Atari): the VTOC in sector 360 starts `$83 $D0 $02`
+//!   and then the text `LiteDOS(c)MrA------VTOC------`. Its directory
+//!   starts at sector 361, in 16-byte entries like DOS 2's.
+//! * **Atari DOS XE** (XF551 drive): `X` (`$58`) in byte 0 of the boot
+//!   sector, where other DOSes have 0 (the OS ignores that byte). Sector
+//!   10 holds the main directory. This is the loosest sign, from one
+//!   disk (the DOS XE master diskette), as no layout notes were found.
 //!
 //! # Names
 //! Names are 8 + 3 characters, padded with spaces, stored as ATASCII

@@ -12,11 +12,26 @@ use crate::image::{Container, DiskImage};
 use crate::names::{self, Name};
 use crate::sparta::{self, Sparta, Timestamp};
 
-/// The file systems a [`Volume`] can work with.
+/// The file systems a [`Volume`] can work with. Each is named for its
+/// disk format, so one label can stand for several DOSes that write the
+/// same disks:
+///
+/// | Label | DOSes |
+/// |---|---|
+/// | [`Dos2`](FileSystem::Dos2) | Atari DOS 2.0S, 2.0D and 2.5 (single and double density), SmartDOS, DOS XL |
+/// | [`Dos25Enhanced`](FileSystem::Dos25Enhanced) | Atari DOS 2.5 on enhanced density |
+/// | [`MyDos`](FileSystem::MyDos) | MyDOS 4.x, K-DOS |
+/// | [`SpartaDos`](FileSystem::SpartaDos) | SpartaDOS 2.x and 3.x |
+/// | [`SpartaDosX`](FileSystem::SpartaDosX) | SpartaDOS X |
+/// | [`Dos3`](FileSystem::Dos3), [`DosXe`](FileSystem::DosXe), [`LiteDos`](FileSystem::LiteDos), [`TopDos`](FileSystem::TopDos) | That DOS alone: recognised, but sectors only |
+///
+/// A DOS that's compatible with DOS 2 but can't be told apart from it
+/// on the disk is reported as [`Dos2`](FileSystem::Dos2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum FileSystem {
     /// Atari DOS 2.0S, 2.0D or 2.5 on a single- or double-density disk.
+    /// SmartDOS and DOS XL write the same disks.
     Dos2,
     /// DOS 2.5 on an enhanced-density disk (1040 sectors, two VTOCs).
     Dos25Enhanced,
@@ -27,8 +42,23 @@ pub enum FileSystem {
     /// [`FileSystem::SpartaDos`], with a few additions.
     SpartaDosX,
     /// MyDOS 4.x: DOS 2's file system with subdirectories and disks of up
-    /// to 65535 sectors.
+    /// to 65535 sectors. K-DOS writes the same disks as MyDOS single
+    /// density (DOS 2's layout, using sector 720 too).
     MyDos,
+    /// Atari DOS 3 (for the 1050 drive, 1K blocks): recognised but not
+    /// supported, so only the sector calls work, and the file calls give
+    /// [`Error::Unsupported`] naming it.
+    Dos3,
+    /// Atari DOS XE (for the XF551 drive): recognised but not supported,
+    /// like [`FileSystem::Dos3`].
+    DosXe,
+    /// LiteDOS (Mr. Atari): recognised but not supported, like
+    /// [`FileSystem::Dos3`].
+    LiteDos,
+    /// TOP-DOS (Eclipse Software): DOS 2's layout with its own VTOC code,
+    /// so it looks like MyDOS. Recognised but not supported, like
+    /// [`FileSystem::Dos3`].
+    TopDos,
     /// No file system this crate knows (or none at all): only the sector
     /// calls work ([`Volume::read_sector`], [`Volume::write_sector`]);
     /// file calls give [`Error::Unsupported`].
@@ -70,7 +100,7 @@ impl FileSystem {
     /// 512-byte-sector disk can't be bootable.
     pub fn features(self) -> Features {
         let sparta = self.is_sparta();
-        let files = self != FileSystem::Raw;
+        let files = self.has_files();
         Features {
             files,
             directories: self.has_directories(),
@@ -84,6 +114,44 @@ impl FileSystem {
             underscore_in_names: sparta,
             digit_first_in_names: sparta,
         }
+    }
+
+    /// Its name, to show: `"DOS 2"`, `"DOS 2.5"`, `"SpartaDOS"`,
+    /// `"SpartaDOS X"`, `"MyDOS"`, `"DOS 3"`, `"DOS XE"`, `"LiteDOS"`,
+    /// `"TOP-DOS"` or `"raw"`.
+    ///
+    /// ```
+    /// use atari_disk::FileSystem;
+    ///
+    /// assert_eq!(FileSystem::Dos3.name(), "DOS 3");
+    /// assert!(!FileSystem::Dos3.features().files); // recognised, not supported
+    /// ```
+    pub fn name(self) -> &'static str {
+        match self {
+            FileSystem::Dos2 => "DOS 2",
+            FileSystem::Dos25Enhanced => "DOS 2.5",
+            FileSystem::SpartaDos => "SpartaDOS",
+            FileSystem::SpartaDosX => "SpartaDOS X",
+            FileSystem::MyDos => "MyDOS",
+            FileSystem::Dos3 => "DOS 3",
+            FileSystem::DosXe => "DOS XE",
+            FileSystem::LiteDos => "LiteDOS",
+            FileSystem::TopDos => "TOP-DOS",
+            FileSystem::Raw => "raw",
+        }
+    }
+
+    /// Does this crate read and write its files? (Raw and the recognised
+    /// but unsupported DOSes: no.)
+    fn has_files(self) -> bool {
+        matches!(
+            self,
+            FileSystem::Dos2
+                | FileSystem::Dos25Enhanced
+                | FileSystem::SpartaDos
+                | FileSystem::SpartaDosX
+                | FileSystem::MyDos
+        )
     }
 
     /// Does it have directories (so `>` paths, [`Volume::make_dir`] and
@@ -366,27 +434,35 @@ impl Volume {
                 FileSystem::SpartaDos
             });
         }
-        let fs = Dos2::open(image).ok()?;
-        Some(match fs.flavour() {
-            dos2::Flavour::Dos2 => FileSystem::Dos2,
-            dos2::Flavour::Enhanced => FileSystem::Dos25Enhanced,
-            dos2::Flavour::MyDos => FileSystem::MyDos,
-        })
+        if let Ok(fs) = Dos2::open(image) {
+            // TOP-DOS disks pass for MyDOS.
+            if fs.flavour() == dos2::Flavour::MyDos && is_top_dos(image) {
+                return Some(FileSystem::TopDos);
+            }
+            return Some(match fs.flavour() {
+                dos2::Flavour::Dos2 => FileSystem::Dos2,
+                dos2::Flavour::Enhanced => FileSystem::Dos25Enhanced,
+                dos2::Flavour::MyDos => FileSystem::MyDos,
+            });
+        }
+        // Only now the ones that can't be read: their signs are looser,
+        // and must never take a disk from a file system that can.
+        unsupported(image)
     }
 
     /// Open the file system on `image`. When [`Volume::detect`] finds
-    /// none, the volume is [`FileSystem::Raw`]: the sector calls work and
-    /// the file calls give [`Error::Unsupported`]. (Ask
-    /// [`Volume::detect`] first to tell a disk with no file system from
-    /// one with.)
+    /// none, the volume is [`FileSystem::Raw`]. On a raw disk, or one
+    /// for a DOS this crate recognises but can't read (DOS 3, DOS XE,
+    /// LiteDOS, TOP-DOS), the sector calls work and the file calls give
+    /// [`Error::Unsupported`] ([`Volume::features`] says which).
     ///
     /// ```no_run
-    /// use atari_disk::{DiskImage, FileSystem, Volume};
+    /// use atari_disk::{DiskImage, Volume};
     ///
     /// let bytes = std::fs::read("GAMES.ATR")?;
     /// let vol = Volume::open(DiskImage::from_bytes(&bytes)?)?;
-    /// if vol.file_system() == FileSystem::Raw {
-    ///     println!("no DOS this crate knows; sectors only");
+    /// if !vol.features().files {
+    ///     println!("a {} disk: sectors only", vol.file_system().name());
     /// }
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
@@ -922,9 +998,11 @@ impl Volume {
     ///
     /// Blank data disks from [`Volume::format`] aren't bootable; nor are
     /// raw disks, disks with 512-byte sectors, or SpartaDOS X disks
-    /// (which boot from the cartridge).
+    /// (which boot from the cartridge). On a DOS this crate recognises but
+    /// can't read (DOS 3, DOS XE, LiteDOS, TOP-DOS) the answer is
+    /// always `false`.
     pub fn is_bootable(&self) -> bool {
-        if self.fs == FileSystem::Raw || self.image.sector_size() > 256 {
+        if !self.fs.has_files() || self.image.sector_size() > 256 {
             return false;
         }
         let Ok(s1) = self.image.sector(1) else {
@@ -978,11 +1056,12 @@ impl Volume {
         if !self.features().bootable {
             return not(match self.fs {
                 FileSystem::SpartaDosX => "SpartaDOS X boots from its cartridge, not the disk",
-                _ => "this disk has no file system",
+                FileSystem::Raw => "this disk has no file system",
+                _ => "this crate can't write files on this disk's file system",
             });
         }
         let src = Volume::open(source.clone())?;
-        if src.fs == FileSystem::Raw {
+        if !src.fs.has_files() {
             return not("the source disk has no DOS 2, MyDOS or SpartaDOS");
         }
         let family = |fs: FileSystem| match fs {
@@ -1110,8 +1189,8 @@ impl Volume {
     }
 
     fn check(&self) -> Result<(Vec<SectorUse>, Vec<Problem>)> {
-        if self.fs == FileSystem::Raw {
-            return Err(raw());
+        if !self.fs.has_files() {
+            return Err(no_files(self.fs));
         }
         let result = if self.fs.is_sparta() {
             check::sparta(&self.image)
@@ -1123,7 +1202,7 @@ impl Volume {
 
     fn need_dirs(&self) -> Result<()> {
         match self.fs {
-            FileSystem::Raw => Err(raw()),
+            fs if !fs.has_files() => Err(no_files(fs)),
             fs if fs.has_directories() => Ok(()),
             _ => Err(no_dirs()),
         }
@@ -1131,7 +1210,7 @@ impl Volume {
 
     fn need_sparta(&self, what: &str) -> Result<()> {
         match self.fs {
-            FileSystem::Raw => Err(raw()),
+            fs if !fs.has_files() => Err(no_files(fs)),
             fs if fs.is_sparta() => Ok(()),
             FileSystem::MyDos => Err(Error::Unsupported(format!("MyDOS has no {what}"))),
             _ => Err(Error::Unsupported(format!("DOS 2 has no {what}"))),
@@ -1154,16 +1233,16 @@ impl Volume {
     }
 
     fn dos2(&self) -> Result<Dos2<'_>> {
-        if self.fs == FileSystem::Raw {
-            return Err(raw());
+        if !self.fs.has_files() {
+            return Err(no_files(self.fs));
         }
         // A direct sector write may have broken it.
         Dos2::open(&self.image).map_err(|e| Error::Damaged(e.to_string()))
     }
 
     fn sparta(&self) -> Result<Sparta<'_>> {
-        if self.fs == FileSystem::Raw {
-            return Err(raw());
+        if !self.fs.has_files() {
+            return Err(no_files(self.fs));
         }
         if !self.fs.is_sparta() {
             return Err(Error::Unsupported("not a SpartaDOS disk".into()));
@@ -1285,8 +1364,53 @@ fn mydos(container: Container, size: usize, count: u32) -> Result<DiskImage> {
     dos2::format(container, dos2::Kind::MyDos { size, count })
 }
 
-fn raw() -> Error {
-    Error::Unsupported("a raw disk has no file system, only sectors".into())
+/// Why a file call can't work on file system `fs`.
+fn no_files(fs: FileSystem) -> Error {
+    Error::Unsupported(match fs {
+        FileSystem::Raw => "a raw disk has no file system, only sectors".into(),
+        _ => format!(
+            "this is a {} disk: only sector access is supported",
+            fs.name()
+        ),
+    })
+}
+
+/// Is this disk, which otherwise reads as MyDOS, a TOP-DOS one? VTOC
+/// code 3, which MyDOS writes only when one VTOC sector can't map the
+/// whole disk, and $80 in the boot sector's first byte (MyDOS has `M`).
+/// See the `formats` page.
+fn is_top_dos(image: &DiskImage) -> bool {
+    let (Ok(boot), Ok(vtoc)) = (image.sector(1), image.sector(360)) else {
+        return false;
+    };
+    let one_sector_maps = (image.sector_size() - 10) * 8 > image.sector_count() as usize;
+    vtoc[0] == 3 && one_sector_maps && boot[0] == 0x80
+}
+
+/// A DOS this crate recognises but can't read, if `image` holds one.
+/// See the `formats` page for the signs.
+fn unsupported(image: &DiskImage) -> Option<FileSystem> {
+    let sector = |n| image.sector(n).ok();
+    let count = image.sector_count();
+    // DOS 3: 128-byte sectors, a 720- or 1040-sector disk, and the first
+    // directory sector (16) with $57 (or $7F on 1040 sectors) and $A5 in
+    // bytes 14-15, as Altirra checks.
+    if image.sector_size() == 128 && (count == 720 || count == 1040) {
+        let blocks = if count == 720 { 0x57 } else { 0x7F };
+        if sector(16).is_some_and(|s| s[14] == blocks && s[15] == 0xA5) {
+            return Some(FileSystem::Dos3);
+        }
+    }
+    // LiteDOS: its VTOC (sector 360) says so.
+    if sector(360).is_some_and(|s| s.get(3..10) == Some(b"LiteDOS")) {
+        return Some(FileSystem::LiteDos);
+    }
+    // DOS XE: `X` in the first byte of the boot sector, where other DOSes
+    // have 0 (the OS ignores it).
+    if sector(1).is_some_and(|s| s[0] == b'X') {
+        return Some(FileSystem::DosXe);
+    }
+    None
 }
 
 fn no_dirs() -> Error {
@@ -2254,6 +2378,95 @@ mod tests {
 
     fn blank_image() -> DiskImage {
         blank().into_image()
+    }
+
+    #[test]
+    fn unsupported_dos_disks_are_recognised() {
+        let empty = |count| DiskImage::new(Container::Atr, 128, count).unwrap();
+        // DOS 3: sector 16's header, on 720 and 1040 sectors.
+        let mut dos3 = empty(720);
+        dos3.sector_mut(16).unwrap()[14..16].copy_from_slice(&[0x57, 0xA5]);
+        let mut dos3_ed = empty(1040);
+        dos3_ed.sector_mut(16).unwrap()[14..16].copy_from_slice(&[0x7F, 0xA5]);
+        // LiteDOS: its VTOC says so.
+        let mut lite = empty(720);
+        lite.sector_mut(360).unwrap()[..10].copy_from_slice(b"\x83\xD0\x02LiteDOS");
+        // DOS XE: `X` in the boot sector.
+        let mut xe = empty(720);
+        xe.sector_mut(1).unwrap()[0] = b'X';
+        for (image, fs, name) in [
+            (dos3, FileSystem::Dos3, "DOS 3"),
+            (dos3_ed, FileSystem::Dos3, "DOS 3"),
+            (lite, FileSystem::LiteDos, "LiteDOS"),
+            (xe, FileSystem::DosXe, "DOS XE"),
+        ] {
+            assert_eq!(Volume::detect(&image), Some(fs));
+            assert_eq!(fs.name(), name);
+            let mut vol = Volume::open(image).unwrap();
+            assert_eq!(vol.file_system(), fs);
+            assert!(!vol.features().files && !vol.features().bootable);
+            assert!(!vol.is_bootable());
+            for result in [
+                vol.list("").map(|_| ()),
+                vol.read("X").map(|_| ()),
+                vol.write("X", b"x", None),
+                vol.delete("X"),
+                vol.make_dir("D", None),
+                vol.move_to("X", ""),
+                vol.set_volume_name("V"),
+                vol.validate().map(|_| ()),
+            ] {
+                let err = result.unwrap_err();
+                assert!(matches!(err, Error::Unsupported(_)), "{err:?}");
+                assert_eq!(
+                    err.to_string(),
+                    format!(
+                        "not supported: this is a {name} disk: only sector access is supported"
+                    )
+                );
+            }
+            assert!(matches!(
+                vol.make_bootable(&blank_image()),
+                Err(Error::NotBootable(_))
+            ));
+            // The sectors still work.
+            vol.write_sector(100, &[9; 128]).unwrap();
+            assert_eq!(vol.read_sector(100).unwrap(), [9; 128]);
+        }
+        // TOP-DOS disks pass for MyDOS but for VTOC code 3 where one
+        // sector would do, and their boot sector.
+        let mut top = blank_image();
+        top.sector_mut(360).unwrap()[0] = 3;
+        top.sector_mut(1).unwrap()[0] = 0x80;
+        assert_eq!(Volume::detect(&top), Some(FileSystem::TopDos));
+        let vol = Volume::open(top).unwrap();
+        assert_eq!(
+            vol.list("").unwrap_err().to_string(),
+            "not supported: this is a TOP-DOS disk: only sector access is supported"
+        );
+        // MyDOS needs VTOC code 3 on 1040 sectors, whatever its boot byte.
+        let mut ed = Volume::format(Layout::MyDosEnhanced, Container::Atr)
+            .unwrap()
+            .into_image();
+        ed.sector_mut(1).unwrap()[0] = 0x80;
+        assert_eq!(Volume::detect(&ed), Some(FileSystem::MyDos));
+        // Only 720 or 1040 sectors of 128 bytes are DOS 3.
+        let mut odd = empty(1000);
+        odd.sector_mut(16).unwrap()[14..16].copy_from_slice(&[0x57, 0xA5]);
+        assert_eq!(Volume::detect(&odd), None);
+        // A disk a supported DOS reads stays that DOS, whatever else it
+        // looks like.
+        let mut dos2 = blank_image();
+        dos2.sector_mut(1).unwrap()[0] = b'X';
+        dos2.sector_mut(16).unwrap()[14..16].copy_from_slice(&[0x57, 0xA5]);
+        assert_eq!(Volume::detect(&dos2), Some(FileSystem::Dos2));
+        // A raw disk still says so.
+        let raw = Volume::open(empty(720)).unwrap();
+        assert_eq!(
+            raw.list("").unwrap_err().to_string(),
+            "not supported: a raw disk has no file system, only sectors"
+        );
+        assert_eq!(FileSystem::Raw.name(), "raw");
     }
 
     #[test]
