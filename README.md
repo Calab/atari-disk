@@ -10,6 +10,10 @@ copying, the DOS's own disk check, and booting.
 **Status:** complete for the formats above; not yet on crates.io, and the
 API may still change a little before a first release.
 
+> **Warning:** use at your own risk. There is no warranty. You are
+> responsible for your own files: keep backups. The authors are not
+> responsible for lost or damaged files, disk images or data.
+
 ## Using it
 
 Add it to your `Cargo.toml`:

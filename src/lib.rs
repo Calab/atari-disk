@@ -2,6 +2,14 @@
 //! files on them: Atari DOS 2 (2.0S, 2.0D, 2.5), MyDOS 4.x, and
 //! SpartaDOS (2.x, 3.x and SpartaDOS X).
 //!
+//! <div class="warning">
+//!
+//! Use at your own risk. There is no warranty. You are responsible for
+//! your own files: keep backups. The authors are not responsible for
+//! lost or damaged files, disk images or data.
+//!
+//! </div>
+//!
 //! # Where to start
 //! * [`Volume`] is what most programs need: open a disk, then list,
 //!   read, write, rename, move, delete and lock files, make directories,
